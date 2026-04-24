@@ -39,11 +39,20 @@ npm run build
 
 ## Environment Variables
 
+`AI_PROVIDER`
+Set to `groq` now, or switch to `anthropic` later.
+
+`GROQ_API_KEY`
+Your Groq API key for live assistant and reflection responses.
+
+`GROQ_MODEL`
+The Groq model name used by SharePass. Example: `llama-3.1-8b-instant`.
+
 `ANTHROPIC_API_KEY`
-Your Anthropic API key for live assistant and reflection responses.
+Optional for later. Your Anthropic API key if you switch providers.
 
 `ANTHROPIC_MODEL`
-The Anthropic model name you want to use.
+Optional for later. The Anthropic model name you want to use.
 
 `MONGODB_URI`
 Your MongoDB connection string.

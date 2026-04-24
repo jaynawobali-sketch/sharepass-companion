@@ -77,6 +77,7 @@ export default async function handler(req, res) {
     const reflection = String(req.body?.reflection || "").trim();
     const emotion = String(req.body?.emotion || "").trim();
     const visibility = String(req.body?.visibility || "public").trim();
+    const username = String(req.body?.username || "").trim();
 
     if (content.length < 10) {
       return res.status(400).json({ error: "Posts should contain at least 10 characters." });
@@ -95,6 +96,7 @@ export default async function handler(req, res) {
       content,
       reflection,
       visibility,
+      username,
     });
 
     if (db) {

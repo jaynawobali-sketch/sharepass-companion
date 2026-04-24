@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Icon from "./Icon";
+import { GATED_VIEW_COPY, SESSION_KEYS } from "../lib/sharepass-session";
 
 const AUTH_OPTIONS = [
   {
@@ -35,26 +36,41 @@ const AUTH_OPTIONS = [
 
 const ENTRY_POINTS = [
   {
-    title: "Softer first impression",
-    body: "The first screen now feels intentional instead of dropping people straight into the app.",
-    Ic: Icon.Heart,
+    title: "Anonymous posting",
+    body: "Share what is heavy, hopeful, or hard to say out loud without exposing your real identity.",
+    Ic: Icon.Privacy,
   },
   {
-    title: "More product-like flow",
-    body: "A real landing and sign-in layer makes GitHub demos and future auth easier to explain.",
-    Ic: Icon.Shield,
+    title: "Emotionally aware AI",
+    body: "Express mode and the assistant both respond in a softer tone built for reflection instead of pressure.",
+    Ic: Icon.Assistant,
   },
   {
-    title: "iPhone-style motion",
-    body: "Bottom-sheet movement gives the experience that familiar swipe-up mobile feel.",
-    Ic: Icon.Rise,
+    title: "Support circles",
+    body: "Signed-in sessions can unlock circles, profile controls, and more persistent community features.",
+    Ic: Icon.Circles,
   },
 ];
 
 const PREVIEW_LINES = [
-  "Breathe once. Then enter gently.",
-  "Private by default, softer in tone.",
-  "Choose how you want to step in today.",
+  "SharePass starts with emotional safety first.",
+  "Anonymous mode keeps entry light and low-friction.",
+  "Signed-in mode unlocks circles, profile, and saved access.",
+];
+
+const PLATFORM_PANELS = [
+  {
+    title: "What SharePass is",
+    body: "A support-oriented emotional space for anonymous expression, gentle AI reflection, and quieter community interaction.",
+  },
+  {
+    title: "What anonymous mode gives you",
+    body: "Feed, Express, and AI Assist stay available so someone can get relief quickly without committing to a full profile.",
+  },
+  {
+    title: "What sign-in unlocks",
+    body: "Profile access, support circles, saved preferences, and future account-based features come in once you choose a sign-in path.",
+  },
 ];
 
 export default function SharePassLanding() {
@@ -63,12 +79,13 @@ export default function SharePassLanding() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [phoneSheetRaised, setPhoneSheetRaised] = useState(false);
   const [highlightedMethod, setHighlightedMethod] = useState("google");
+  const [redirectReason, setRedirectReason] = useState("");
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
 
-    const savedTheme = window.localStorage.getItem("sharepass.theme");
-    const savedMethod = window.localStorage.getItem("sharepass.entryMethod");
+    const savedTheme = window.localStorage.getItem(SESSION_KEYS.theme);
+    const savedMethod = window.localStorage.getItem(SESSION_KEYS.entryMethod);
 
     if (savedTheme === "light" || savedTheme === "dark") {
       setTheme(savedTheme);
@@ -88,17 +105,38 @@ export default function SharePassLanding() {
   }, []);
 
   useEffect(() => {
+    if (!router.isReady) return;
+
+    const reason = typeof router.query.reason === "string" ? router.query.reason : "";
+    const shouldOpenSheet = router.query.sheet === "1";
+
+    setRedirectReason(reason);
+
+    if (shouldOpenSheet) {
+      setSheetOpen(true);
+    }
+  }, [router.isReady, router.query.reason, router.query.sheet]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("sharepass.theme", theme);
+    window.localStorage.setItem(SESSION_KEYS.theme, theme);
   }, [theme]);
 
   const handleEnter = async method => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem("sharepass.entryMethod", method);
+      const previousMethod = window.localStorage.getItem(SESSION_KEYS.entryMethod);
+
+      if (previousMethod !== method) {
+        window.localStorage.removeItem(SESSION_KEYS.username);
+      }
+
+      window.localStorage.setItem(SESSION_KEYS.entryMethod, method);
     }
 
     await router.push("/app");
   };
+
+  const gateCopy = GATED_VIEW_COPY[redirectReason];
 
   return (
     <div className="entry-page" data-theme={theme}>
@@ -127,14 +165,31 @@ export default function SharePassLanding() {
 
           <div className="section-pill">
             <Icon.Privacy />
-            Gentle Sign In
+            Private-First Entry
           </div>
 
-          <h1 className="entry-title">A warmer landing page before the support space opens.</h1>
+          <h1 className="entry-title">A softer front door for anonymous support and calmer conversations.</h1>
           <p className="entry-lead">
-            This entry flow adds a real front door to SharePass: modern, private-feeling, and shaped like a mobile
-            sheet that lifts up from below instead of throwing people straight into the interface.
+            SharePass is designed for people who need somewhere gentle to unload, reflect, and feel a little less
+            alone. Anonymous mode keeps the first step easy. Signing in unlocks circles, profile access, and future
+            member features.
           </p>
+
+          {gateCopy && (
+            <div className="entry-context-note">
+              <strong>{gateCopy.title}</strong>
+              <span>{gateCopy.body}</span>
+            </div>
+          )}
+
+          <div className="entry-story-grid">
+            {PLATFORM_PANELS.map(panel => (
+              <article key={panel.title} className="entry-story-card">
+                <h2>{panel.title}</h2>
+                <p>{panel.body}</p>
+              </article>
+            ))}
+          </div>
 
           <div className="entry-points">
             {ENTRY_POINTS.map(({ title, body, Ic }) => (
@@ -249,8 +304,8 @@ export default function SharePassLanding() {
             </div>
             <h2 className="entry-auth-title">Choose how you want to sign in.</h2>
             <p className="entry-auth-sub">
-              The options below are styled like a real mobile entry flow, while still leading into your anonymous
-              SharePass experience.
+              Anonymous entry gets you into Feed, Express, and AI Assist quickly. Signing in unlocks profile access,
+              circles, and a more persistent SharePass path.
             </p>
           </div>
 
@@ -284,7 +339,7 @@ export default function SharePassLanding() {
         <div className="entry-auth-footer">
           <div className="entry-auth-footer-note">
             <Icon.Shield />
-            <span>Demo sign-in options now, real auth integration later if you want to connect providers.</span>
+            <span>Guest mode stays lightweight on purpose. Signed-in mode is where profile, circles, and future account features open up.</span>
           </div>
         </div>
       </aside>

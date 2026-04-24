@@ -1,7 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import Icon from "./Icon";
-import { CIRCLES, EMOTIONS, SEED_POSTS, createAnonymousUsername } from "../lib/sharepass-data";
+import { CIRCLES, EMOTIONS, SEED_POSTS } from "../lib/sharepass-data";
+import {
+  clearSharePassSession,
+  createSessionUsername,
+  GATED_VIEWS,
+  getSessionMethodLabel,
+  isGuestEntry,
+  SESSION_KEYS,
+} from "../lib/sharepass-session";
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
@@ -576,7 +584,38 @@ function AIChat({ onBack }) {
   );
 }
 
-function CirclesView() {
+function AccessGateView({ title, body, onRequireAccount }) {
+  return (
+    <div className="sp-panel">
+      <div className="sp-card access-gate-card">
+        <div className="section-pill">
+          <Icon.Lock />
+          Sign-In Required
+        </div>
+        <div className="sp-h1">{title}</div>
+        <div className="sp-sub" style={{ marginBottom: 18 }}>
+          {body}
+        </div>
+        <button className="sp-btn sp-btn-primary" type="button" onClick={onRequireAccount}>
+          View Login Options
+          <Icon.Rise />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CirclesView({ isGuest, onRequireAccount }) {
+  if (isGuest) {
+    return (
+      <AccessGateView
+        title="Support circles open after sign-in."
+        body="Anonymous mode keeps the first step light. Choose a sign-in option when you want saved circles and deeper participation."
+        onRequireAccount={() => onRequireAccount("circles")}
+      />
+    );
+  }
+
   return (
     <div className="sp-panel">
       <div style={{ marginBottom: 22 }}>
@@ -666,7 +705,57 @@ function ProfileView({ username, privacyState, onPrivacyToggle, onLogout, loggin
 }
 
 // ─── RIGHT PANEL ──────────────────────────────────────────────────────────────
-function RightPanel({ username }) {
+function RightPanel({ username, isGuest, entryMethod, onRequireAccount }) {
+  if (isGuest) {
+    return (
+      <div className="right-panel-content">
+        <div className="side-section identity-section">
+          <div className="sp-label">Anonymous Mode</div>
+          <div className="identity-badge guest-identity-badge">
+            <div className="identity-avatar"><Icon.Guest /></div>
+            <div className="identity-copy">
+              <div className="identity-name">{username}</div>
+              <div className="identity-meta">Guest session · lightweight access</div>
+              <div className="identity-note">
+                <Icon.Shield />
+                <span>No saved profile yet</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="side-section">
+          <div className="sp-label">Available Now</div>
+          {["Browse honest posts", "Use Express mode", "Talk to the AI companion"].map(item => (
+            <div key={item} className="circle-mini">
+              <span className="circle-mini-icon">•</span>
+              <div className="circle-mini-copy">
+                <div className="circle-mini-title">{item}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="side-section">
+          <div className="sp-label">Unlock With Sign-In</div>
+          {["Profile controls", "Support circles", "Saved session identity"].map(item => (
+            <div key={item} className="circle-mini restricted-circle-mini">
+              <span className="circle-mini-icon"><Icon.Lock /></span>
+              <div className="circle-mini-copy">
+                <div className="circle-mini-title">{item}</div>
+              </div>
+            </div>
+          ))}
+          <button className="join-btn guest-upgrade-btn" type="button" onClick={() => onRequireAccount?.("profile")}>
+            <Icon.Rise />
+            See Login Options
+          </button>
+        </div>
+        <div className="safe-exit">
+          Anonymous mode stays soft on purpose. Sign in only when you want circles, a saved profile, and more persistent features.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="right-panel-content">
       <div className="side-section identity-section">
@@ -675,7 +764,7 @@ function RightPanel({ username }) {
           <div className="identity-avatar"><Icon.Leaf /></div>
           <div className="identity-copy">
             <div className="identity-name">{username}</div>
-            <div className="identity-meta">Anonymous profile</div>
+            <div className="identity-meta">{getSessionMethodLabel(entryMethod)}</div>
             <div className="identity-note">
               <Icon.Shield />
               <span>Protected and secure</span>
@@ -727,30 +816,43 @@ export default function SharePass() {
   const [theme, setTheme] = useState("dark");
   const [privacy, setPrivacy] = useState({ autoDelete: true, rotation: false, hideSearch: true });
   const [mobileIdentityOpen, setMobileIdentityOpen] = useState(false);
+  const [entryMethod, setEntryMethod] = useState("");
   const [username, setUsername] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
   const lastNonChatViewRef = useRef("home");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const savedUsername = window.localStorage.getItem("sharepass.username");
+    const savedEntryMethod = window.localStorage.getItem(SESSION_KEYS.entryMethod);
 
-    if (savedUsername) {
-      setUsername(savedUsername);
+    if (!savedEntryMethod) {
+      void router.replace("/");
       return;
     }
 
-    const generatedUsername = createAnonymousUsername();
-    window.localStorage.setItem("sharepass.username", generatedUsername);
+    setEntryMethod(savedEntryMethod);
+
+    const savedUsername = window.localStorage.getItem(SESSION_KEYS.username);
+
+    if (savedUsername) {
+      setUsername(savedUsername);
+      setSessionReady(true);
+      return;
+    }
+
+    const generatedUsername = createSessionUsername(savedEntryMethod);
+    window.localStorage.setItem(SESSION_KEYS.username, generatedUsername);
     setUsername(generatedUsername);
-  }, []);
+    setSessionReady(true);
+  }, [router]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const savedTheme = window.localStorage.getItem("sharepass.theme");
-    const savedPrivacy = window.localStorage.getItem("sharepass.privacy");
+    const savedTheme = window.localStorage.getItem(SESSION_KEYS.theme);
+    const savedPrivacy = window.localStorage.getItem(SESSION_KEYS.privacy);
 
     if (savedTheme === "light" || savedTheme === "dark") {
       setTheme(savedTheme);
@@ -760,19 +862,19 @@ export default function SharePass() {
       try {
         setPrivacy(JSON.parse(savedPrivacy));
       } catch {
-        window.localStorage.removeItem("sharepass.privacy");
+        window.localStorage.removeItem(SESSION_KEYS.privacy);
       }
     }
   }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("sharepass.theme", theme);
+    window.localStorage.setItem(SESSION_KEYS.theme, theme);
   }, [theme]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("sharepass.privacy", JSON.stringify(privacy));
+    window.localStorage.setItem(SESSION_KEYS.privacy, JSON.stringify(privacy));
   }, [privacy]);
 
   useEffect(() => {
@@ -797,9 +899,22 @@ export default function SharePass() {
     };
   }, []);
 
+  const isGuest = isGuestEntry(entryMethod);
+
   const toggleTheme = () => setTheme(t => t === "dark" ? "light" : "dark");
   const togglePrivacy = key => setPrivacy(p => ({ ...p, [key]: !p[key] }));
   const toggleMobileIdentity = () => setMobileIdentityOpen(open => !open);
+
+  const handleRequireAccount = useCallback(reason => {
+    setMobileIdentityOpen(false);
+    void router.push({
+      pathname: "/",
+      query: {
+        sheet: "1",
+        reason,
+      },
+    });
+  }, [router]);
 
   const handleReact = useCallback((postId, type) => {
     setPosts(prev => prev.map(p =>
@@ -810,6 +925,11 @@ export default function SharePass() {
   }, []);
 
   const handleViewChange = useCallback((newView) => {
+    if (isGuest && GATED_VIEWS.has(newView)) {
+      handleRequireAccount(newView);
+      return;
+    }
+
     if (newView === "chat") {
       if (view !== "chat") {
         lastNonChatViewRef.current = view;
@@ -820,19 +940,22 @@ export default function SharePass() {
 
     setView(newView);
     setMobileIdentityOpen(false); // Close mobile identity panel when navigating
-  }, [view]);
+  }, [handleRequireAccount, isGuest, view]);
 
   const handlePostPublished = useCallback(async postDraft => {
     const response = await requestJson("/api/posts", {
       method: "POST",
-      body: JSON.stringify(postDraft),
+      body: JSON.stringify({
+        ...postDraft,
+        username,
+      }),
     });
 
     setPosts(prev => [response.post, ...prev.filter(post => post.id !== response.post.id)]);
     setHeardToast(true);
     setMobileIdentityOpen(false); // Close mobile identity panel after posting
     setTimeout(() => { setHeardToast(false); setView("home"); }, 2800);
-  }, []);
+  }, [username]);
 
   const handleLogout = useCallback(async () => {
     if (typeof window === "undefined" || loggingOut) return;
@@ -840,9 +963,7 @@ export default function SharePass() {
     setLoggingOut(true);
     setMobileIdentityOpen(false);
 
-    window.localStorage.removeItem("sharepass.username");
-    window.localStorage.removeItem("sharepass.entryMethod");
-    window.localStorage.removeItem("sharepass.privacy");
+    clearSharePassSession(window.localStorage);
 
     try {
       await router.push("/");
@@ -852,7 +973,7 @@ export default function SharePass() {
   }, [loggingOut, router]);
 
   // Don't render until username is generated to avoid hydration mismatch
-  if (!username) {
+  if (!sessionReady || !username) {
     return (
       <div className="sp-app" data-theme={theme}>
         <div className="sp-ambient" />
@@ -883,22 +1004,33 @@ export default function SharePass() {
         {/* Mobile Identity Panel */}
         <div className={`mobile-identity-overlay ${mobileIdentityOpen ? 'open' : ''}`} onClick={toggleMobileIdentity} />
         <aside className={`mobile-identity-panel ${mobileIdentityOpen ? 'open' : ''}`}>
-          <RightPanel username={username} />
+          <RightPanel
+            username={username}
+            isGuest={isGuest}
+            entryMethod={entryMethod}
+            onRequireAccount={handleRequireAccount}
+          />
         </aside>
 
         {/* Sidebar */}
         <aside className="sp-sidebar">
           <div className="sp-logo"><Icon.Logo /></div>
           {NAV.map(n => (
-            <button key={n.id} className={`sp-nav-btn ${n.id === "chat" ? "chat-nav-btn" : ""} ${view === n.id ? "active" : ""}`} onClick={() => handleViewChange(n.id)}>
+            <button
+              key={n.id}
+              className={`sp-nav-btn ${n.id === "chat" ? "chat-nav-btn" : ""} ${isGuest && GATED_VIEWS.has(n.id) ? "restricted" : ""} ${view === n.id ? "active" : ""}`}
+              onClick={() => handleViewChange(n.id)}
+            >
               <n.Ic active={view === n.id} />
               <span className="sp-nav-label">{n.label}</span>
+              {isGuest && GATED_VIEWS.has(n.id) && <span className="sp-nav-lock">+</span>}
               <span className="sp-nav-tooltip">{n.label}</span>
             </button>
           ))}
           <div className="sp-sidebar-bottom">
-            <button className={`sp-sidebar-utility ${view === "profile" ? "active" : ""}`} onClick={() => handleViewChange("profile")} title="Profile">
+            <button className={`sp-sidebar-utility ${isGuest ? "restricted" : ""} ${view === "profile" ? "active" : ""}`} onClick={() => handleViewChange("profile")} title="Profile">
               <Icon.Profile active={view === "profile"} />
+              {isGuest && <span className="sp-nav-lock utility-lock">+</span>}
               <span className="sp-nav-tooltip">Profile</span>
             </button>
             <button className="sp-sidebar-utility" onClick={toggleTheme} title="Toggle display theme">
@@ -926,7 +1058,7 @@ export default function SharePass() {
           {view === "home"    && <HomeFeed posts={posts} onReact={handleReact} />}
           {view === "express" && <ExpressView onPostPublished={handlePostPublished} />}
           {view === "chat"    && <AIChat onBack={() => handleViewChange(lastNonChatViewRef.current || "home")} />}
-          {view === "circles" && <CirclesView />}
+          {view === "circles" && <CirclesView isGuest={isGuest} onRequireAccount={handleRequireAccount} />}
           {view === "profile" && (
             <ProfileView
               username={username}
@@ -940,7 +1072,7 @@ export default function SharePass() {
 
         {/* Right panel */}
         <aside className="sp-right">
-          <RightPanel username={username} />
+          <RightPanel username={username} isGuest={isGuest} entryMethod={entryMethod} onRequireAccount={handleRequireAccount} />
         </aside>
 
         {/* "You are heard" toast */}
