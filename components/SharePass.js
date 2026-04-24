@@ -1,13 +1,27 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import Icon from "./Icon";
-import { CIRCLES, EMOTIONS, SEED_POSTS } from "../lib/sharepass-data";
+import { EMOTIONS, formatRelativeTime, SEED_POSTS } from "../lib/sharepass-data";
+import {
+  createCircleFromDraft,
+  createCircleMember,
+  createCircleMessage,
+  createCurrentMemberId,
+  createSeedCircles,
+  getCircleAudience,
+  getCircleMember,
+  getCirclePreviewColors,
+  getCircleSpeakers,
+} from "../lib/sharepass-circles";
 import {
   clearSharePassSession,
-  createSessionUsername,
+  ensureSuperAdminEmails,
   GATED_VIEWS,
+  getSharePassSession,
   getSessionMethodLabel,
+  isSuperAdminSession,
   isGuestEntry,
+  saveSharePassSession,
   SESSION_KEYS,
 } from "../lib/sharepass-session";
 
@@ -825,26 +839,17 @@ export default function SharePass() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const savedEntryMethod = window.localStorage.getItem(SESSION_KEYS.entryMethod);
+    const savedSession = getSharePassSession(window.localStorage);
 
-    if (!savedEntryMethod) {
+    if (!savedSession?.entryMethod) {
       void router.replace("/");
       return;
     }
 
-    setEntryMethod(savedEntryMethod);
+    const normalizedSession = saveSharePassSession(window.localStorage, savedSession) || savedSession;
 
-    const savedUsername = window.localStorage.getItem(SESSION_KEYS.username);
-
-    if (savedUsername) {
-      setUsername(savedUsername);
-      setSessionReady(true);
-      return;
-    }
-
-    const generatedUsername = createSessionUsername(savedEntryMethod);
-    window.localStorage.setItem(SESSION_KEYS.username, generatedUsername);
-    setUsername(generatedUsername);
+    setEntryMethod(normalizedSession.entryMethod);
+    setUsername(normalizedSession.username);
     setSessionReady(true);
   }, [router]);
 

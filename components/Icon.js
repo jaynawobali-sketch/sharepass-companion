@@ -223,10 +223,11 @@ const Icon = {
     </svg>
   ),
   Google: () => (
-    <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
-      <path d="M15 9.2C15 12.43 12.55 14.8 9.2 14.8C5.84 14.8 3.2 12.16 3.2 8.8C3.2 5.44 5.84 2.8 9.2 2.8C10.84 2.8 12.23 3.39 13.28 4.36" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-      <path d="M15 9.2H9.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-      <path d="M12.4 1.9L15.1 4.6L12.4 7.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path d="M17.64 9.2C17.64 8.57 17.58 7.96 17.47 7.36H9V10.84H13.84C13.63 11.97 12.99 12.92 12.05 13.56V15.81H14.95C16.66 14.24 17.64 11.93 17.64 9.2Z" fill="#4285F4"/>
+      <path d="M9 18C11.43 18 13.47 17.19 14.95 15.81L12.05 13.56C11.24 14.1 10.22 14.42 9 14.42C6.66 14.42 4.67 12.84 3.97 10.71H0.98V13.03C2.45 15.95 5.48 18 9 18Z" fill="#34A853"/>
+      <path d="M3.96 10.71C3.78 10.17 3.68 9.6 3.68 9C3.68 8.4 3.78 7.83 3.96 7.29V4.97H0.98C0.36 6.21 0 7.57 0 9C0 10.43 0.36 11.79 0.98 13.03L3.96 10.71Z" fill="#FBBC04"/>
+      <path d="M9 3.58C10.34 3.58 11.55 4.04 12.5 4.94L15.02 2.42C13.47 0.98 11.43 0 9 0C5.48 0 2.45 2.05 0.98 4.97L3.96 7.29C4.67 5.16 6.66 3.58 9 3.58Z" fill="#EA4335"/>
     </svg>
   ),
   Apple: () => (
@@ -236,9 +237,12 @@ const Icon = {
     </svg>
   ),
   Mail: () => (
-    <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
-      <rect x="2.5" y="4" width="13" height="10" rx="2.3" stroke="currentColor" strokeWidth="1.4"/>
-      <path d="M3.7 5.2L9 9.35L14.3 5.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path d="M3 14.4V5.4L9 9.72L15 5.4V14.4" stroke="#EA4335" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M3 5.4L9 9.72L15 5.4" stroke="#EA4335" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M3 14.4L6.15 10.98" stroke="#4285F4" strokeWidth="1.6" strokeLinecap="round"/>
+      <path d="M15 14.4L11.85 10.98" stroke="#34A853" strokeWidth="1.6" strokeLinecap="round"/>
+      <path d="M3.72 4.92H14.28" stroke="#FBBC04" strokeWidth="1.3" strokeLinecap="round"/>
     </svg>
   ),
   Guest: () => (
