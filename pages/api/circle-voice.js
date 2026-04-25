@@ -77,6 +77,7 @@ function createVoiceRoomResponse(circle, room, actorId) {
 
   return {
     active: Boolean(circle.voiceSession?.active),
+    startedAt: circle.voiceSession?.startedAt || "",
     participants,
     signals: room.signals
       .filter(signal => signal.toMemberId === actorId)
@@ -126,6 +127,7 @@ export default async function handler(req, res) {
         return res.status(200).json({
           room: {
             active: false,
+            startedAt: "",
             participants: [],
             signals: [],
             updatedAt: new Date().toISOString(),

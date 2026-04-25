@@ -1,14 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { useRouter } from "next/router";
 import Icon from "./Icon";
 import {
   createSessionProfile,
   GATED_VIEW_COPY,
   getSavedProviderAccounts,
+  readStoredTheme,
   saveProviderAccount,
   saveSharePassSession,
   SESSION_KEYS,
 } from "../lib/sharepass-session";
+
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 const AUTH_OPTIONS = [
   {
@@ -147,15 +150,16 @@ export default function SharePassLanding() {
   const [typedLineIndex, setTypedLineIndex] = useState(0);
   const [typingMode, setTypingMode] = useState("typing");
 
+  useIsomorphicLayoutEffect(() => {
+    if (typeof window === "undefined") return;
+
+    setTheme(readStoredTheme(window.localStorage));
+  }, []);
+
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
 
-    const savedTheme = window.localStorage.getItem(SESSION_KEYS.theme);
     const savedMethod = window.localStorage.getItem(SESSION_KEYS.entryMethod);
-
-    if (savedTheme === "light" || savedTheme === "dark") {
-      setTheme(savedTheme);
-    }
 
     if (savedMethod) {
       setHighlightedMethod(savedMethod);

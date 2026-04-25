@@ -14,6 +14,7 @@ import {
   clearCircleVoiceRoom,
   isAdminEmail,
   removeCircleVoiceParticipant,
+  readCircleVoiceRoom,
   readCircles,
   replaceCircles,
   resolveStore,
@@ -225,8 +226,19 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Join the circle before raising your hand." });
       }
 
+      if (currentMember?.role === "moderator") {
+        return res.status(400).json({ error: "Moderators do not need to raise a hand to manage the floor." });
+      }
+
       if (!currentCircle.voiceSession?.active) {
         return res.status(400).json({ error: "The moderator has not started the voice floor yet." });
+      }
+
+      const voiceRoom = await readCircleVoiceRoom(db, circleId);
+      const isConnectedToLiveRoom = voiceRoom.participants.some(participant => participant.memberId === actorId);
+
+      if (!isConnectedToLiveRoom) {
+        return res.status(400).json({ error: "Join the live audio room before raising your hand." });
       }
 
       const isQueued = currentCircle.requestQueue.includes(actorId);
@@ -261,6 +273,13 @@ export default async function handler(req, res) {
 
       if (!invitedMember) {
         return res.status(404).json({ error: "Member not found in this circle." });
+      }
+
+      const voiceRoom = await readCircleVoiceRoom(db, circleId);
+      const isInvitedMemberConnected = voiceRoom.participants.some(participant => participant.memberId === invitedMemberId);
+
+      if (!isInvitedMemberConnected) {
+        return res.status(400).json({ error: "That member needs to join the live audio room before taking the floor." });
       }
 
       nextCircle = bumpCircleUnreadCounts(syncCircleVoiceSession({
@@ -336,12 +355,9 @@ export default async function handler(req, res) {
       }
 
       const nextActive = !currentCircle.voiceSession?.active;
+      const nextVoiceStartedAt = nextActive ? new Date().toISOString() : "";
       const actorMember = getCircleMember(currentCircle, actorId);
-      const nextSpeakers = nextActive
-        ? (actorMember && !currentCircle.speakers.includes(actorId)
-            ? [actorId, ...currentCircle.speakers]
-            : currentCircle.speakers)
-        : [];
+      const nextSpeakers = nextActive ? currentCircle.speakers : [];
 
       nextCircle = bumpCircleUnreadCounts(syncCircleVoiceSession({
         ...currentCircle,
@@ -358,7 +374,10 @@ export default async function handler(req, res) {
             type: "announcement",
           }),
         ],
-      }, { active: nextActive }), actorId);
+      }, {
+        active: nextActive,
+        startedAt: nextVoiceStartedAt,
+      }), actorId);
     }
 
     if (action === "send-message") {

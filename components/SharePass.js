@@ -1,26 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
 import Icon from "./Icon";
-import { EMOTIONS, formatRelativeTime, SEED_POSTS } from "../lib/sharepass-data";
+import { EMOTIONS, formatRelativeTime } from "../lib/sharepass-data";
 import {
   createCurrentMemberId,
-  getCircleAudience,
   getCircleMember,
   getCircleModerators,
   getCirclePreviewColors,
-  getCircleSpeakers,
 } from "../lib/sharepass-circles";
 import {
   clearSharePassSession,
   ensureSuperAdminEmails,
   GATED_VIEWS,
   getSharePassSession,
+  readStoredTheme,
   getSessionMethodLabel,
   isSuperAdminSession,
   isGuestEntry,
   saveSharePassSession,
   SESSION_KEYS,
 } from "../lib/sharepass-session";
+
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
@@ -69,6 +70,45 @@ const EMPTY_ITEMS = [];
 
 function createVoiceClientId(prefix = "voice") {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
+
+function clampUnit(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
+}
+
+function formatElapsedDuration(startedAt, nowMs = Date.now()) {
+  const startedMs = new Date(startedAt).getTime();
+
+  if (!startedAt || !Number.isFinite(startedMs)) {
+    return "00:00";
+  }
+
+  const totalSeconds = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function measureAnalyserLevel(analyser, sampleBuffer) {
+  if (!analyser || !sampleBuffer) {
+    return 0;
+  }
+
+  analyser.getByteFrequencyData(sampleBuffer);
+
+  let total = 0;
+
+  for (let index = 0; index < sampleBuffer.length; index += 1) {
+    total += sampleBuffer[index];
+  }
+
+  return clampUnit((total / Math.max(1, sampleBuffer.length) / 255 - 0.04) / 0.56);
 }
 
 function getCircleUnreadCount(circle, memberId) {
@@ -243,13 +283,22 @@ function ReactionBar({ reactions, reacted, onReact }) {
 
 function PostCard({ post, onReact }) {
   const emotion = EMOTIONS.find(e => e.id === post.emotion);
+  const visibilityLabel = post.visibility === "private"
+    ? "Only you"
+    : post.visibility === "circle"
+      ? "Circle"
+      : "Open";
+
   return (
     <div className="post-card">
       <div className="post-header">
         <div className="post-avatar" style={{ background: post.avatarBg }}>{post.avatar}</div>
         <div className="post-meta">
           <div className="post-username">{post.username}</div>
-          <div className="post-time">{post.time}</div>
+          <div className="post-meta-row">
+            <div className="post-time">{post.time}</div>
+            <span className={`post-visibility-tag ${post.visibility}`}>{visibilityLabel}</span>
+          </div>
         </div>
         {emotion && <div className="post-emotion-tag">{emotion.icon} {emotion.label}</div>}
       </div>
@@ -278,17 +327,72 @@ function CrisisBanner() {
 }
 
 // ─── VIEWS ────────────────────────────────────────────────────────────────────
-function HomeFeed({ posts, onReact }) {
+function isPostOwnedByCurrentUser(post, currentUserId, username) {
+  if (currentUserId && post.authorId) {
+    return post.authorId === currentUserId;
+  }
+
+  return Boolean(username && post.username === username);
+}
+
+function HomeFeed({ posts, onReact, currentUserId, isGuest, username }) {
+  const [feedTab, setFeedTab] = useState("open");
+  const openPosts = posts.filter(post => post.visibility === "public");
+  const circlePosts = posts.filter(post => post.visibility === "circle");
+  const yourPosts = posts.filter(post => isPostOwnedByCurrentUser(post, currentUserId, username));
+  const postsByTab = {
+    open: openPosts,
+    circle: circlePosts,
+    yours: yourPosts,
+  };
+  const activePosts = postsByTab[feedTab] || [];
+  const feedTabs = [
+    { id: "open", label: "Open Feed", badge: openPosts.length > 0 ? String(openPosts.length) : "" },
+    { id: "circle", label: "Circle Pulse", badge: circlePosts.length > 0 ? String(circlePosts.length) : "", badgeTone: "success" },
+    { id: "yours", label: "Your Echoes", badge: yourPosts.length > 0 ? String(yourPosts.length) : "", badgeTone: "accent" },
+  ];
+  const activeFeedCopy = {
+    open: {
+      pill: "Open Feed",
+      title: "Public check-ins from the wider room.",
+      body: "These are the honest posts people chose to leave open for the whole SharePass community.",
+      empty: "No open posts yet. When people share publicly, they will show up here.",
+    },
+    circle: {
+      pill: "Circle Pulse",
+      title: isGuest ? "Circle-only sharing opens after sign-in." : "Posts meant for closer community eyes.",
+      body: isGuest
+        ? "If you ever share for a closer space, your own post can still live here, but sign-in unlocks the wider circle community."
+        : "This lane gathers posts people shared for the signed-in community instead of the full public feed.",
+      empty: isGuest
+        ? "Circle Pulse starts after sign-in. Once you unlock circles, those closer posts will collect here."
+        : "No circle-only posts yet. When people share for the closer community, they will appear here.",
+    },
+    yours: {
+      pill: "Your Echoes",
+      title: "Everything you have shared, in one place.",
+      body: "Public, circle, and personal posts you wrote stay grouped here so you can find your own voice quickly.",
+      empty: "You have not shared a post yet. Your own check-ins will appear here after you publish one.",
+    },
+  }[feedTab];
+
   return (
     <div className="sp-panel">
-      <div className="feed-header">
+      <div className="feed-header feed-header-stacked">
         <div>
-          <div className="section-pill">Community Chats</div>
-          <div className="sp-h1">Real people, honest check-ins.</div>
-          <div className="sp-sub">Anonymous voices sharing what is heavy, hopeful, or hard to say out loud.</div>
+          <div className="section-pill">{activeFeedCopy.pill}</div>
+          <div className="sp-h1">{activeFeedCopy.title}</div>
+          <div className="sp-sub">{activeFeedCopy.body}</div>
         </div>
       </div>
-      {posts.map(p => <PostCard key={p.id} post={p} onReact={onReact} />)}
+      <ViewTabs items={feedTabs} activeId={feedTab} onChange={setFeedTab} />
+      {activePosts.length > 0 ? activePosts.map(p => (
+        <PostCard key={p.id} post={p} onReact={onReact} />
+      )) : (
+        <div className="circle-empty-note">
+          {activeFeedCopy.empty}
+        </div>
+      )}
     </div>
   );
 }
@@ -851,11 +955,13 @@ function CircleVoicePanel({
   canModerateRoom,
   currentMember,
   currentUserId,
+  onRoomSnapshotChange,
   onToggleVoiceSession,
   sessionProfile,
 }) {
   const [voiceRoom, setVoiceRoom] = useState({
     active: Boolean(activeCircle.voiceSession?.active),
+    startedAt: activeCircle.voiceSession?.startedAt || "",
     participants: [],
     signals: [],
     updatedAt: activeCircle.voiceSession?.updatedAt || "",
@@ -865,16 +971,42 @@ function CircleVoicePanel({
   const [micMuted, setMicMuted] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("");
   const [voiceError, setVoiceError] = useState("");
+  const [clockNowMs, setClockNowMs] = useState(Date.now());
+  const [localAudioLevel, setLocalAudioLevel] = useState(0);
+  const [remoteAudioLevels, setRemoteAudioLevels] = useState({});
   const [remoteStreams, setRemoteStreams] = useState({});
   const localStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
   const processedSignalIdsRef = useRef(new Set());
   const remoteAudioRefs = useRef({});
+  const audioContextRef = useRef(null);
+  const analyserEntriesRef = useRef({});
+  const meterFrameRef = useRef(null);
   const activeCircleId = activeCircle.id;
   const voiceParticipants = Array.isArray(voiceRoom.participants) ? voiceRoom.participants : EMPTY_ITEMS;
   const connectedParticipants = voiceParticipants.length;
   const connectedListeners = voiceParticipants.filter(participant => !participant.onFloor && !participant.isModerator);
+  const floorStartedAt = activeCircle.voiceSession?.startedAt || voiceRoom.startedAt || "";
+
+  useEffect(() => {
+    onRoomSnapshotChange?.({
+      circleId: activeCircleId,
+      active: Boolean(activeCircle.voiceSession?.active || voiceRoom.active),
+      startedAt: floorStartedAt,
+      participants: voiceParticipants,
+      updatedAt: voiceRoom.updatedAt || activeCircle.voiceSession?.updatedAt || "",
+    });
+  }, [
+    activeCircle.voiceSession?.active,
+    activeCircle.voiceSession?.updatedAt,
+    activeCircleId,
+    floorStartedAt,
+    onRoomSnapshotChange,
+    voiceParticipants,
+    voiceRoom.active,
+    voiceRoom.updatedAt,
+  ]);
 
   const closePeerConnection = useCallback(remoteMemberId => {
     const connection = peerConnectionsRef.current[remoteMemberId];
@@ -897,6 +1029,154 @@ function CircleVoicePanel({
       delete nextStreams[remoteMemberId];
       return nextStreams;
     });
+  }, []);
+
+  const resetAudioAnalysis = useCallback(() => {
+    if (meterFrameRef.current) {
+      window.cancelAnimationFrame(meterFrameRef.current);
+      meterFrameRef.current = null;
+    }
+
+    Object.values(analyserEntriesRef.current).forEach(entry => {
+      try {
+        entry?.source?.disconnect();
+      } catch {
+        // Ignore analyser cleanup failures during teardown.
+      }
+    });
+
+    analyserEntriesRef.current = {};
+    setLocalAudioLevel(0);
+    setRemoteAudioLevels({});
+
+    if (audioContextRef.current) {
+      const audioContext = audioContextRef.current;
+      audioContextRef.current = null;
+      void audioContext.close().catch(() => null);
+    }
+  }, []);
+
+  const ensureAudioContext = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+
+    if (!AudioContextCtor) {
+      return null;
+    }
+
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContextCtor();
+    }
+
+    if (audioContextRef.current.state === "suspended") {
+      try {
+        await audioContextRef.current.resume();
+      } catch (error) {
+        console.error("Failed to resume audio context", error);
+      }
+    }
+
+    return audioContextRef.current;
+  }, []);
+
+  const disconnectMemberAnalyser = useCallback((memberId, { clearRemoteLevel = true } = {}) => {
+    const currentEntry = analyserEntriesRef.current[memberId];
+
+    if (currentEntry) {
+      try {
+        currentEntry.source?.disconnect();
+      } catch {
+        // Ignore analyser cleanup failures during teardown.
+      }
+
+      delete analyserEntriesRef.current[memberId];
+    }
+
+    if (memberId === currentUserId) {
+      setLocalAudioLevel(0);
+      return;
+    }
+
+    if (clearRemoteLevel) {
+      setRemoteAudioLevels(currentLevels => {
+        if (!(memberId in currentLevels)) {
+          return currentLevels;
+        }
+
+        const nextLevels = { ...currentLevels };
+        delete nextLevels[memberId];
+        return nextLevels;
+      });
+    }
+  }, [currentUserId]);
+
+  const attachStreamAnalyser = useCallback(async (memberId, stream) => {
+    if (!memberId || !stream || stream.getAudioTracks().length === 0) {
+      return;
+    }
+
+    const audioContext = await ensureAudioContext();
+
+    if (!audioContext) {
+      return;
+    }
+
+    const existingEntry = analyserEntriesRef.current[memberId];
+
+    if (existingEntry?.stream === stream) {
+      return;
+    }
+
+    disconnectMemberAnalyser(memberId, { clearRemoteLevel: false });
+
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 128;
+    analyser.smoothingTimeConstant = 0.84;
+    source.connect(analyser);
+
+    analyserEntriesRef.current[memberId] = {
+      stream,
+      source,
+      analyser,
+      sampleBuffer: new Uint8Array(analyser.frequencyBinCount),
+    };
+  }, [disconnectMemberAnalyser, ensureAudioContext]);
+
+  const syncCurrentParticipantMute = useCallback(nextMuted => {
+    setVoiceRoom(currentRoom => ({
+      ...currentRoom,
+      participants: currentRoom.participants.map(participant => (
+        participant.memberId === currentUserId
+          ? { ...participant, muted: nextMuted }
+          : participant
+      )),
+    }));
+  }, [currentUserId]);
+
+  const applyMuteState = useCallback(nextMuted => {
+    const nextEnabled = !nextMuted;
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach(track => {
+        track.enabled = nextEnabled;
+      });
+    }
+
+    Object.values(peerConnectionsRef.current).forEach(connection => {
+      connection.getSenders().forEach(sender => {
+        if (sender.track?.kind === "audio") {
+          sender.track.enabled = nextEnabled;
+        }
+      });
+    });
+
+    if (!nextEnabled) {
+      setLocalAudioLevel(0);
+    }
   }, []);
 
   const detachAudioRoom = useCallback(({ status = "", error = "", clearParticipants = false } = {}) => {
@@ -925,6 +1205,7 @@ function CircleVoicePanel({
       localStreamRef.current = null;
     }
 
+    resetAudioAnalysis();
     setRemoteStreams({});
     setAudioJoined(false);
     setAudioBusy(false);
@@ -932,12 +1213,13 @@ function CircleVoicePanel({
     setVoiceRoom(currentRoom => ({
       ...currentRoom,
       active: Boolean(activeCircle.voiceSession?.active),
+      startedAt: activeCircle.voiceSession?.startedAt || currentRoom.startedAt || "",
       signals: [],
       participants: clearParticipants ? [] : currentRoom.participants,
     }));
     setVoiceStatus(status);
     setVoiceError(error);
-  }, [activeCircle.voiceSession?.active]);
+  }, [activeCircle.voiceSession?.active, activeCircle.voiceSession?.startedAt, resetAudioAnalysis]);
 
   const postVoiceAction = useCallback(async (action, extra = {}) => {
     const response = await requestJson("/api/circle-voice", {
@@ -1159,6 +1441,7 @@ function CircleVoicePanel({
       }
 
       localStreamRef.current = stream;
+      applyMuteState(micMuted);
       await postVoiceAction("join", { muted: micMuted });
       setAudioJoined(true);
       setVoiceStatus("You are connected to the live audio room.");
@@ -1178,7 +1461,7 @@ function CircleVoicePanel({
     } finally {
       setAudioBusy(false);
     }
-  }, [activeCircle.voiceSession?.active, currentMember, fetchVoiceRoom, micMuted, postVoiceAction]);
+  }, [activeCircle.voiceSession?.active, applyMuteState, currentMember, fetchVoiceRoom, micMuted, postVoiceAction]);
 
   const handleToggleMute = useCallback(async () => {
     if (!audioJoined || !localStreamRef.current) {
@@ -1187,23 +1470,21 @@ function CircleVoicePanel({
 
     const nextMuted = !micMuted;
 
-    localStreamRef.current.getAudioTracks().forEach(track => {
-      track.enabled = !nextMuted;
-    });
+    applyMuteState(nextMuted);
     setMicMuted(nextMuted);
     setVoiceError("");
+    syncCurrentParticipantMute(nextMuted);
 
     try {
       await postVoiceAction("set-muted", { muted: nextMuted });
       setVoiceStatus(nextMuted ? "Your microphone is muted." : "Your microphone is live.");
     } catch (error) {
-      localStreamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = !micMuted;
-      });
+      applyMuteState(micMuted);
       setMicMuted(micMuted);
+      syncCurrentParticipantMute(micMuted);
       setVoiceError(error.message || "The microphone state could not be updated right now.");
     }
-  }, [audioJoined, micMuted, postVoiceAction]);
+  }, [applyMuteState, audioJoined, micMuted, postVoiceAction, syncCurrentParticipantMute]);
 
   const bindRemoteAudioRef = useCallback((memberId, node) => {
     if (node) {
@@ -1231,6 +1512,95 @@ function CircleVoicePanel({
       }
     });
   }, [remoteStreams]);
+
+  useEffect(() => {
+    if (!activeCircle.voiceSession?.active && voiceParticipants.length === 0) {
+      return undefined;
+    }
+
+    setClockNowMs(Date.now());
+
+    const intervalId = window.setInterval(() => {
+      setClockNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeCircle.voiceSession?.active, voiceParticipants.length]);
+
+  useEffect(() => {
+    if (!audioJoined || !localStreamRef.current) {
+      disconnectMemberAnalyser(currentUserId);
+      return undefined;
+    }
+
+    void attachStreamAnalyser(currentUserId, localStreamRef.current);
+
+    return () => {
+      disconnectMemberAnalyser(currentUserId);
+    };
+  }, [attachStreamAnalyser, audioJoined, currentUserId, disconnectMemberAnalyser]);
+
+  useEffect(() => {
+    Object.entries(remoteStreams).forEach(([memberId, stream]) => {
+      void attachStreamAnalyser(memberId, stream);
+    });
+
+    Object.keys(analyserEntriesRef.current).forEach(memberId => {
+      if (memberId !== currentUserId && !remoteStreams[memberId]) {
+        disconnectMemberAnalyser(memberId);
+      }
+    });
+  }, [attachStreamAnalyser, currentUserId, disconnectMemberAnalyser, remoteStreams]);
+
+  useEffect(() => {
+    if (meterFrameRef.current) {
+      window.cancelAnimationFrame(meterFrameRef.current);
+      meterFrameRef.current = null;
+    }
+
+    const tickLevels = () => {
+      let nextLocalLevel = 0;
+      const nextRemoteLevels = {};
+
+      Object.entries(analyserEntriesRef.current).forEach(([memberId, entry]) => {
+        const participant = voiceParticipants.find(item => item.memberId === memberId);
+        const isLocalParticipant = memberId === currentUserId;
+        const isMuted = isLocalParticipant ? micMuted : Boolean(participant?.muted);
+        const measuredLevel = isMuted ? 0 : measureAnalyserLevel(entry.analyser, entry.sampleBuffer);
+
+        if (isLocalParticipant) {
+          nextLocalLevel = measuredLevel;
+        } else {
+          nextRemoteLevels[memberId] = measuredLevel;
+        }
+      });
+
+      setLocalAudioLevel(nextLocalLevel);
+      setRemoteAudioLevels(currentLevels => {
+        const nextKeys = Object.keys(nextRemoteLevels);
+        const currentKeys = Object.keys(currentLevels);
+
+        if (nextKeys.length === currentKeys.length && nextKeys.every(key => Math.abs((currentLevels[key] || 0) - (nextRemoteLevels[key] || 0)) < 0.025)) {
+          return currentLevels;
+        }
+
+        return nextRemoteLevels;
+      });
+
+      meterFrameRef.current = window.requestAnimationFrame(tickLevels);
+    };
+
+    meterFrameRef.current = window.requestAnimationFrame(tickLevels);
+
+    return () => {
+      if (meterFrameRef.current) {
+        window.cancelAnimationFrame(meterFrameRef.current);
+        meterFrameRef.current = null;
+      }
+    };
+  }, [currentUserId, micMuted, voiceParticipants]);
 
   useEffect(() => {
     if (!activeCircle.voiceSession?.active || !sessionProfile?.email || !currentMember) {
@@ -1459,7 +1829,32 @@ function CircleVoicePanel({
       localStreamRef.current.getTracks().forEach(track => track.stop());
       localStreamRef.current = null;
     }
-  }, [activeCircleId, audioJoined, sessionProfile]);
+    resetAudioAnalysis();
+  }, [activeCircleId, audioJoined, resetAudioAnalysis, sessionProfile]);
+
+  const floorElapsedLabel = activeCircle.voiceSession?.active
+    ? formatElapsedDuration(floorStartedAt, clockNowMs)
+    : "00:00";
+  const liveMicCount = voiceParticipants.filter(participant => !participant.muted).length;
+  const roomMotionLevel = Math.max(localAudioLevel, ...Object.values(remoteAudioLevels));
+  const featuredParticipant = voiceParticipants.reduce((bestMatch, participant) => {
+    if (participant.muted) {
+      return bestMatch;
+    }
+
+    const participantLevel = participant.memberId === currentUserId
+      ? localAudioLevel
+      : (remoteAudioLevels[participant.memberId] || 0);
+
+    if (!bestMatch || participantLevel > bestMatch.level) {
+      return {
+        level: participantLevel,
+        participant,
+      };
+    }
+
+    return bestMatch;
+  }, null);
 
   return (
     <div className="sp-card circle-voice-card">
@@ -1481,20 +1876,94 @@ function CircleVoicePanel({
 
       <div className="circle-voice-grid">
         <div className="circle-voice-main">
+          <div className="circle-voice-stage">
+            <div className="circle-voice-stage-top">
+              <div>
+                <div className="sp-label">Floor Timer</div>
+                <div className="circle-voice-stage-time">{floorElapsedLabel}</div>
+              </div>
+              <div className="circle-card-statuses">
+                <NotificationBadge value={connectedParticipants > 0 ? `${connectedParticipants} connected` : ""} tone="accent" />
+                <NotificationBadge value={liveMicCount > 0 ? `${liveMicCount} live mics` : ""} tone="success" />
+              </div>
+            </div>
+
+            <div className="circle-voice-stage-body">
+              <div
+                className={`circle-voice-radar ${audioJoined ? "joined" : ""} ${micMuted ? "muted" : ""}`}
+                style={{ "--voice-level": String(clampUnit(roomMotionLevel)) }}
+              >
+                <span className="circle-voice-radar-ring circle-voice-radar-ring-one" />
+                <span className="circle-voice-radar-ring circle-voice-radar-ring-two" />
+                <span className="circle-voice-radar-core">
+                  {micMuted ? <Icon.Mic active={false} /> : <Icon.Wave />}
+                </span>
+                <div className="circle-voice-spectrum" aria-hidden="true">
+                  {Array.from({ length: 14 }).map((_, index) => {
+                    const barStrength = clampUnit(roomMotionLevel * 1.35 - (index * 0.06));
+
+                    return (
+                      <span
+                        key={`room-bar-${index}`}
+                        className={`circle-voice-spectrum-bar ${barStrength > 0.12 ? "active" : ""}`}
+                        style={{ "--voice-bar-scale": String(0.24 + barStrength * 1.18) }}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="circle-voice-stage-copy">
+                <strong>
+                  {featuredParticipant?.level > 0.16
+                    ? `${featuredParticipant.participant.name} is carrying the audio right now.`
+                    : audioJoined
+                      ? (micMuted ? "You are listening with your mic muted." : "You are in the live room and your mic is ready.")
+                      : activeCircle.voiceSession?.active
+                        ? "The audio room is open and waiting for people to join."
+                        : "The audio room opens when a moderator starts the live floor."}
+                </strong>
+                <p>
+                  {floorStartedAt
+                    ? `Floor started ${formatRelativeTime(floorStartedAt)} and has been open for ${floorElapsedLabel}.`
+                    : "The timer appears here when the live floor starts."}
+                  {" "}
+                  {currentMember
+                    ? "Mute state now syncs across the room."
+                    : "Join this circle first so the audio room can recognize you."}
+                </p>
+                <div className="circle-voice-stage-meta">
+                  <div className="circle-voice-stage-chip">
+                    <span className="sp-label">Your mic</span>
+                    <strong>{audioJoined ? (micMuted ? "Muted" : "Live") : "Offline"}</strong>
+                  </div>
+                  <div className="circle-voice-stage-chip">
+                    <span className="sp-label">Room motion</span>
+                    <strong>{roomMotionLevel > 0.18 ? "Active" : "Calm"}</strong>
+                  </div>
+                  <div className="circle-voice-stage-chip">
+                    <span className="sp-label">Since start</span>
+                    <strong>{floorElapsedLabel}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div className="circle-voice-note">
             <span className="circle-voice-note-icon"><Icon.Wave /></span>
             <div>
               <strong>
                 {audioJoined
-                  ? (micMuted ? "You are in the room with your mic muted." : "You are live in the room.")
+                  ? (micMuted ? "Your mic is muted but you are still inside the live room." : "Your mic is open and other people can hear you in real time.")
                   : activeCircle.voiceSession?.active
-                    ? "The audio room is open."
-                    : "The audio room opens when a moderator starts the voice floor."}
+                    ? "Join the live room when you are ready to listen and speak."
+                    : "The room stays chat-first until a moderator starts the floor."}
               </strong>
               <p>
                 {currentMember
-                  ? "Use mute whenever you need a quieter moment. The room still follows the circle's turn-taking culture, even while everyone can hear the live call."
-                  : "Join this circle first, then the audio room can recognize you and connect you to the live call."}
+                  ? "The center shows room activity, and each row shows who is connected right now."
+                  : "Join this circle first, then the audio room can connect you."}
               </p>
             </div>
           </div>
@@ -1551,9 +2020,21 @@ function CircleVoicePanel({
             const member = getCircleMember(activeCircle, participant.memberId);
             const mood = member ? getMoodMeta(member.mood) : null;
             const avatarTone = member?.color || "var(--accent2)";
+            const participantLevel = participant.memberId === currentUserId
+              ? localAudioLevel
+              : (remoteAudioLevels[participant.memberId] || 0);
+            const participantDuration = formatElapsedDuration(participant.joinedAt || floorStartedAt, clockNowMs);
+            const participantRoleLabel = participant.isModerator
+              ? "Moderator"
+              : participant.onFloor
+                ? "On the floor"
+                : "In the room";
 
             return (
-              <div key={participant.memberId} className={`circle-voice-member ${participant.muted ? "muted" : ""}`}>
+              <div
+                key={participant.memberId}
+                className={`circle-voice-member ${participant.muted ? "muted" : ""} ${participantLevel > 0.14 ? "speaking" : ""}`}
+              >
                 <div className="circle-voice-member-main">
                   <span className="circle-voice-avatar" style={{ background: avatarTone }}>
                     {participant.name.charAt(0).toUpperCase()}
@@ -1561,12 +2042,11 @@ function CircleVoicePanel({
                   <div className="circle-voice-member-copy">
                     <strong>{participant.name}</strong>
                     <span>
-                      {participant.isModerator
-                        ? "Moderator"
-                        : participant.onFloor
-                          ? "On the floor"
-                          : "In the room"}
+                      {participantRoleLabel}
                       {mood ? ` · ${mood.icon} ${mood.label}` : ""}
+                    </span>
+                    <span className="circle-voice-member-time">
+                      Connected for {participantDuration}
                     </span>
                   </div>
                 </div>
@@ -1575,6 +2055,19 @@ function CircleVoicePanel({
                     {participant.muted ? "Muted" : "Mic On"}
                   </span>
                   {isCurrentParticipant ? <span className="circle-voice-chip you">You</span> : null}
+                </div>
+                <div className="circle-voice-member-meter" aria-hidden="true">
+                  {Array.from({ length: 12 }).map((_, index) => {
+                    const barStrength = clampUnit(participantLevel * 1.45 - (index * 0.075));
+
+                    return (
+                      <span
+                        key={`${participant.memberId}-meter-${index}`}
+                        className={`circle-voice-member-bar ${barStrength > 0.1 ? "active" : ""}`}
+                        style={{ "--voice-bar-scale": String(0.22 + barStrength * 1.12) }}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             );
@@ -1635,6 +2128,13 @@ function CirclesView({
     icon: "🫶",
   });
   const [roomTab, setRoomTab] = useState("overview");
+  const [activeVoiceSnapshot, setActiveVoiceSnapshot] = useState({
+    circleId: "",
+    active: false,
+    startedAt: "",
+    participants: [],
+    updatedAt: "",
+  });
   const circleChatPreviewRef = useRef(null);
   const circleChatFeedRef = useRef(null);
   const circleChatComposerRef = useRef(null);
@@ -1657,6 +2157,13 @@ function CirclesView({
     setChatDraft("");
     setAnnouncementDraft("");
     setRoomTab("overview");
+    setActiveVoiceSnapshot({
+      circleId: activeCircleId || "",
+      active: false,
+      startedAt: "",
+      participants: [],
+      updatedAt: "",
+    });
   }, [activeCircleId]);
 
   const currentUserId = createCurrentMemberId(sessionProfile);
@@ -1750,8 +2257,6 @@ function CirclesView({
 
   if (activeCircle) {
     const currentMember = getCircleMember(activeCircle, currentUserId);
-    const speakers = getCircleSpeakers(activeCircle);
-    const audience = getCircleAudience(activeCircle);
     const moderators = getCircleModerators(activeCircle);
     const queuedMembers = activeCircle.requestQueue
       .map(memberId => getCircleMember(activeCircle, memberId))
@@ -1762,6 +2267,28 @@ function CirclesView({
     const isCurrentUserQueued = activeCircle.requestQueue.includes(currentUserId);
     const currentUnreadCount = getCircleUnreadCount(activeCircle, currentUserId);
     const canModerateRoom = isSuperAdmin || currentMember?.role === "moderator";
+    const canCurrentUserRequestFloor = Boolean(currentMember && currentMember.role !== "moderator" && !isCurrentUserSpeaker);
+    const liveVoiceParticipants = activeVoiceSnapshot.circleId === activeCircle.id && Array.isArray(activeVoiceSnapshot.participants)
+      ? activeVoiceSnapshot.participants
+      : EMPTY_ITEMS;
+    const liveParticipantIds = new Set(
+      liveVoiceParticipants
+        .map(participant => participant.memberId)
+        .filter(Boolean),
+    );
+    const liveSpeakerMembers = liveVoiceParticipants
+      .filter(participant => participant.onFloor || participant.isModerator)
+      .map(participant => getCircleMember(activeCircle, participant.memberId))
+      .filter(Boolean);
+    const liveListenerMembers = liveVoiceParticipants
+      .filter(participant => !participant.onFloor && !participant.isModerator)
+      .map(participant => getCircleMember(activeCircle, participant.memberId))
+      .filter(Boolean);
+    const connectedMemberCount = liveParticipantIds.size;
+    const connectedQueuedMembers = queuedMembers.filter(member => liveParticipantIds.has(member.id));
+    const connectedModeratorCount = liveVoiceParticipants.filter(participant => participant.isModerator).length;
+    const isCurrentUserConnectedToLiveRoom = liveParticipantIds.has(currentUserId);
+    const activeVoiceRoom = Boolean(activeCircle.voiceSession?.active || activeVoiceSnapshot.active);
     const roomTabs = [
       { id: "overview", label: "Overview" },
       { id: "stage", label: "Voice Floor", badge: isCircleLive(activeCircle) ? "Live" : "", badgeTone: "success" },
@@ -1779,12 +2306,12 @@ function CirclesView({
           </button>
         )}
 
-        {currentMember && !isCurrentUserSpeaker && (
+        {canCurrentUserRequestFloor && (
           <button
             className={`sp-btn ${isCurrentUserQueued ? "sp-btn-ghost" : "sp-btn-primary"}`}
             type="button"
             onClick={() => onToggleHand(activeCircle.id)}
-            disabled={!activeCircle.voiceSession?.active || (!activeCircle.allowRequests && !isCurrentUserQueued)}
+            disabled={!activeCircle.voiceSession?.active || !isCurrentUserConnectedToLiveRoom || (!activeCircle.allowRequests && !isCurrentUserQueued)}
           >
             {isCurrentUserQueued ? "Lower Hand" : "Raise Hand"}
           </button>
@@ -1837,40 +2364,38 @@ function CirclesView({
           </div>
         </div>
 
-        <div className="circle-room-alert-strip">
-          <div className="sp-card circle-alert-card">
-            <span className="sp-label">Voice floor</span>
-            <strong>{activeCircle.voiceSession?.active ? "Live now" : "Waiting for moderator"}</strong>
-            <p>{activeCircle.voiceSession?.active ? "A moderator has started the room and members can request the floor." : "The room chat is open, but the live speaking session has not started yet."}</p>
+        <div className="circle-room-summary-strip">
+          <div className="sp-card circle-room-summary-card">
+            <span className="sp-label">Live room</span>
+            <strong>{activeVoiceRoom ? "Open" : "Closed"}</strong>
+            <p>{connectedMemberCount > 0 ? `${connectedMemberCount} connected right now` : "No one connected yet"}</p>
           </div>
-          <div className="sp-card circle-alert-card">
-            <span className="sp-label">Unread chat</span>
-            <strong>{currentUnreadCount} messages</strong>
-            <p>Unread group chat badges stay visible across the room, your profile, and the desktop side panel.</p>
-          </div>
-          <div className="sp-card circle-alert-card">
+          <div className="sp-card circle-room-summary-card">
             <span className="sp-label">Queue</span>
-            <strong>{activeCircle.requestQueue.length} waiting</strong>
-            <p>{activeCircle.allowRequests ? "Hands are open and people can queue for the voice floor." : "Hands are paused until a moderator reopens requests."}</p>
+            <strong>{connectedQueuedMembers.length}</strong>
+            <p>{activeCircle.allowRequests ? "Connected members can raise a hand once they join audio." : "Requests are paused for now."}</p>
           </div>
-          <div className="sp-card circle-alert-card">
-            <span className="sp-label">Latest pulse</span>
-            <strong>{latestMessage ? latestMessage.author : "No message yet"}</strong>
-            <p>{latestMessage ? latestMessage.text : "Once people start chatting here, the latest message preview appears across the circles directory."}</p>
+          <div className="sp-card circle-room-summary-card">
+            <span className="sp-label">Chat</span>
+            <strong>{currentUnreadCount}</strong>
+            <p>{latestMessage ? `${latestMessage.author}: ${latestMessage.text}` : "No messages yet in this circle."}</p>
           </div>
         </div>
 
         <ViewTabs items={roomTabs} activeId={roomTab} onChange={setRoomTab} />
 
-        <CircleVoicePanel
-          key={`${activeCircle.id}-${currentUserId}`}
-          activeCircle={activeCircle}
-          canModerateRoom={canModerateRoom}
-          currentMember={currentMember}
-          currentUserId={currentUserId}
-          onToggleVoiceSession={onToggleVoiceSession}
-          sessionProfile={sessionProfile}
-        />
+        <div className={`circle-stage-panel-shell ${roomTab === "stage" ? "" : "hidden"}`}>
+          <CircleVoicePanel
+            key={`${activeCircle.id}-${currentUserId}`}
+            activeCircle={activeCircle}
+            canModerateRoom={canModerateRoom}
+            currentMember={currentMember}
+            currentUserId={currentUserId}
+            onRoomSnapshotChange={setActiveVoiceSnapshot}
+            onToggleVoiceSession={onToggleVoiceSession}
+            sessionProfile={sessionProfile}
+          />
+        </div>
 
         {roomTab === "overview" && (
           <div className="circle-room-layout">
@@ -1897,8 +2422,8 @@ function CirclesView({
                   <strong>{currentMember ? "You are part of this circle" : "You are not in this circle yet"}</strong>
                   <p>
                     {currentMember
-                      ? `You joined as ${currentMember.role === "moderator" ? "a moderator" : "a listener"} and your mood is currently marked as ${getMoodMeta(currentMood).label.toLowerCase()}.`
-                      : "Join the circle to listen in, chat with the group, and raise your hand when you are ready to speak."}
+                      ? `You joined as ${currentMember.role === "moderator" ? "a moderator" : "a member"} and your mood is currently marked as ${getMoodMeta(currentMood).label.toLowerCase()}.`
+                      : "Join the circle to chat with the group first, then enter audio when you are ready to be seen live."}
                   </p>
                 </div>
               </div>
@@ -1909,6 +2434,18 @@ function CirclesView({
                   {moderators.map(member => (
                     <CircleMemberRow key={member.id} member={member} badge="Moderator" />
                   ))}
+                </div>
+              </div>
+
+              <div className="sp-card circle-room-side-card">
+                <div className="sp-label">Live presence</div>
+                <div className="circle-presence-card">
+                  <strong>{connectedMemberCount > 0 ? `${connectedMemberCount} people connected` : "No live participants yet"}</strong>
+                  <p>
+                    {connectedMemberCount > 0
+                      ? `${connectedModeratorCount} moderator${connectedModeratorCount === 1 ? "" : "s"} and ${liveListenerMembers.length} listener${liveListenerMembers.length === 1 ? "" : "s"} are currently inside audio.`
+                      : "Member status shows up here only after someone actually joins the live audio room."}
+                  </p>
                 </div>
               </div>
             </div>
@@ -1930,38 +2467,38 @@ function CirclesView({
 
                 <div className="circle-stage-grid">
                   <div className="circle-stage-column">
-                    <div className="sp-label">Speaking Now</div>
+                    <div className="sp-label">On The Floor</div>
                     <div className="circle-member-stack">
-                      {speakers.length > 0 ? speakers.map(member => (
+                      {liveSpeakerMembers.length > 0 ? liveSpeakerMembers.map(member => (
                         <CircleMemberRow
                           key={member.id}
                           member={member}
                           badge={member.role === "moderator" ? "Moderator" : "Speaker"}
                         />
-                      )) : <div className="circle-empty-note">No one is on the floor yet. A moderator can start the voice session when the room is ready.</div>}
+                      )) : <div className="circle-empty-note">No one is on the live floor yet. Members appear here only after they join audio and take the mic.</div>}
                     </div>
                   </div>
 
                   <div className="circle-stage-column">
                     <div className="sp-label">Raised Hands</div>
                     <div className="circle-member-stack">
-                      {queuedMembers.length > 0 ? queuedMembers.map(member => (
+                      {connectedQueuedMembers.length > 0 ? connectedQueuedMembers.map(member => (
                         <CircleMemberRow
                           key={member.id}
                           member={member}
                           badge="Waiting"
                           actions={canModerateRoom ? [{ label: "Invite", onClick: () => onInviteSpeaker(activeCircle.id, member.id) }] : []}
                         />
-                      )) : <div className="circle-empty-note">The queue is quiet right now. Members can raise a hand when they are ready.</div>}
+                      )) : <div className="circle-empty-note">The queue is quiet right now. People can raise a hand after joining the live audio room.</div>}
                     </div>
                   </div>
 
                   <div className="circle-stage-column">
-                    <div className="sp-label">Listening In</div>
+                    <div className="sp-label">Listening Live</div>
                     <div className="circle-member-stack">
-                      {audience.length > 0 ? audience.map(member => (
-                        <CircleMemberRow key={member.id} member={member} badge={member.id === currentUserId ? "You" : "Listening"} />
-                      )) : <div className="circle-empty-note">Everyone currently listed is on the floor.</div>}
+                      {liveListenerMembers.length > 0 ? liveListenerMembers.map(member => (
+                        <CircleMemberRow key={member.id} member={member} badge={member.id === currentUserId ? "You" : "Live"} />
+                      )) : <div className="circle-empty-note">No listener status shows until someone actually joins the live audio room.</div>}
                     </div>
                   </div>
                 </div>
@@ -2004,9 +2541,9 @@ function CirclesView({
 
             <div className="circle-stage-grid">
               <div className="circle-stage-column">
-                <div className="sp-label">Speaking Now</div>
+                <div className="sp-label">On The Floor</div>
                 <div className="circle-member-stack">
-                  {speakers.length > 0 ? speakers.map(member => (
+                  {liveSpeakerMembers.length > 0 ? liveSpeakerMembers.map(member => (
                     <CircleMemberRow
                       key={member.id}
                       member={member}
@@ -2015,30 +2552,30 @@ function CirclesView({
                         ? [{ label: "Audience", onClick: () => onMoveToAudience(activeCircle.id, member.id) }]
                         : []}
                     />
-                  )) : <div className="circle-empty-note">No one is on the floor yet. A moderator can start the session and invite the first speaker.</div>}
+                  )) : <div className="circle-empty-note">No one is on the floor yet. Moderators and speakers appear here only after joining audio.</div>}
                 </div>
               </div>
 
               <div className="circle-stage-column">
                 <div className="sp-label">Raised Hands</div>
                 <div className="circle-member-stack">
-                  {queuedMembers.length > 0 ? queuedMembers.map(member => (
+                  {connectedQueuedMembers.length > 0 ? connectedQueuedMembers.map(member => (
                     <CircleMemberRow
                       key={member.id}
                       member={member}
                       badge="Waiting"
                       actions={canModerateRoom ? [{ label: "Invite", onClick: () => onInviteSpeaker(activeCircle.id, member.id) }] : []}
                     />
-                  )) : <div className="circle-empty-note">The queue is quiet right now. Members can raise a hand when they are ready.</div>}
+                  )) : <div className="circle-empty-note">The queue is quiet right now. Members can raise a hand once they are inside the live room.</div>}
                 </div>
               </div>
 
               <div className="circle-stage-column">
-                <div className="sp-label">Listening In</div>
+                <div className="sp-label">Listening Live</div>
                 <div className="circle-member-stack">
-                  {audience.length > 0 ? audience.map(member => (
-                    <CircleMemberRow key={member.id} member={member} badge={member.id === currentUserId ? "You" : "Listening"} />
-                  )) : <div className="circle-empty-note">Everyone currently listed is on the floor.</div>}
+                  {liveListenerMembers.length > 0 ? liveListenerMembers.map(member => (
+                    <CircleMemberRow key={member.id} member={member} badge={member.id === currentUserId ? "You" : "Live"} />
+                  )) : <div className="circle-empty-note">No live listeners yet. Circle members who have not joined audio stay in the People tab instead.</div>}
                 </div>
               </div>
             </div>
@@ -2059,8 +2596,8 @@ function CirclesView({
               <div className="sp-card circle-room-side-card">
                 <div className="sp-label">Live status</div>
                 <div className="circle-presence-card">
-                  <strong>{activeCircle.voiceSession?.active ? "Voice floor is active" : "Voice floor is closed"}</strong>
-                  <p>{activeCircle.voiceSession?.active ? "Members can request the mic and keep chatting while the room is live." : "Moderators can start the next live floor when the circle is ready."}</p>
+                  <strong>{activeVoiceRoom ? "Voice floor is active" : "Voice floor is closed"}</strong>
+                  <p>{activeVoiceRoom ? `${connectedMemberCount} connected right now. Member status turns live only after they join audio.` : "Moderators can start the next live floor when the circle is ready."}</p>
                 </div>
               </div>
 
@@ -2183,8 +2720,8 @@ function CirclesView({
               <div className="sp-card circle-room-side-card">
                 <div className="sp-label">Moderation summary</div>
                 <div className="circle-presence-card">
-                  <strong>{activeCircle.voiceSession?.active ? "Voice floor is active" : "Voice floor is closed"}</strong>
-                  <p>{activeCircle.allowRequests ? "Hands are open and moderators can invite people to speak." : "Hands are paused until a moderator reopens the queue."}</p>
+                  <strong>{activeVoiceRoom ? "Voice floor is active" : "Voice floor is closed"}</strong>
+                  <p>{activeCircle.allowRequests ? "Hands are open, but only connected audio participants can enter the queue." : "Hands are paused until a moderator reopens the queue."}</p>
                 </div>
               </div>
 
@@ -3011,7 +3548,7 @@ function RightPanel({
 export default function SharePass() {
   const router = useRouter();
   const [view, setView] = useState("home");
-  const [posts, setPosts] = useState(SEED_POSTS);
+  const [posts, setPosts] = useState([]);
   const [heardToast, setHeardToast] = useState(false);
   const [theme, setTheme] = useState("dark");
   const [privacy, setPrivacy] = useState({ autoDelete: true, rotation: false, hideSearch: true });
@@ -3031,6 +3568,8 @@ export default function SharePass() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const lastNonChatViewRef = useRef("home");
+  const isGuest = isGuestEntry(entryMethod);
+  const currentUserId = sessionProfile ? createCurrentMemberId(sessionProfile) : "";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3052,15 +3591,16 @@ export default function SharePass() {
     setSessionReady(true);
   }, [router]);
 
+  useIsomorphicLayoutEffect(() => {
+    if (typeof window === "undefined" || !sessionReady) return;
+
+    setTheme(readStoredTheme(window.localStorage));
+  }, [sessionReady]);
+
   useEffect(() => {
     if (typeof window === "undefined" || !sessionReady) return;
 
-    const savedTheme = window.localStorage.getItem(SESSION_KEYS.theme);
     const savedPrivacy = window.localStorage.getItem(SESSION_KEYS.privacy);
-
-    if (savedTheme === "light" || savedTheme === "dark") {
-      setTheme(savedTheme);
-    }
 
     if (savedPrivacy) {
       try {
@@ -3142,13 +3682,22 @@ export default function SharePass() {
   }, [activeCircleId, sessionReady]);
 
   useEffect(() => {
+    if (!sessionReady) {
+      return undefined;
+    }
+
     let active = true;
 
     const loadPosts = async () => {
       try {
-        const response = await requestJson("/api/posts");
+        const query = new URLSearchParams({
+          viewerId: currentUserId,
+          username,
+          entryMethod: entryMethod || "guest",
+        });
+        const response = await requestJson(`/api/posts?${query.toString()}`);
 
-        if (active && Array.isArray(response.posts) && response.posts.length > 0) {
+        if (active && Array.isArray(response.posts)) {
           setPosts(response.posts);
         }
       } catch (error) {
@@ -3161,10 +3710,8 @@ export default function SharePass() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [currentUserId, entryMethod, sessionReady, username]);
 
-  const isGuest = isGuestEntry(entryMethod);
-  const currentUserId = sessionProfile ? createCurrentMemberId(sessionProfile) : "";
   const joinedCircles = circles.filter(circle => circle.members.some(member => member.id === currentUserId));
   const circleUnreadCount = joinedCircles.reduce((sum, circle) => sum + getCircleUnreadCount(circle, currentUserId), 0);
   const liveCircleCount = joinedCircles.filter(circle => isCircleLive(circle)).length;
@@ -3611,6 +4158,7 @@ export default function SharePass() {
       method: "POST",
       body: JSON.stringify({
         ...postDraft,
+        authorId: currentUserId,
         username,
       }),
     });
@@ -3619,7 +4167,7 @@ export default function SharePass() {
     setHeardToast(true);
     setMobileIdentityOpen(false); // Close mobile identity panel after posting
     setTimeout(() => { setHeardToast(false); setView("home"); }, 2800);
-  }, [username]);
+  }, [currentUserId, username]);
 
   const handleLogout = useCallback(async () => {
     if (typeof window === "undefined" || loggingOut) return;
@@ -3744,7 +4292,7 @@ export default function SharePass() {
 
         {/* Main */}
         <main className={`sp-main ${view === "chat" ? "chat-main" : ""}`}>
-          {view === "home"    && <HomeFeed posts={posts} onReact={handleReact} />}
+          {view === "home"    && <HomeFeed currentUserId={currentUserId} isGuest={isGuest} posts={posts} onReact={handleReact} username={username} />}
           {view === "express" && <ExpressView onPostPublished={handlePostPublished} />}
           {view === "chat"    && <AIChat onBack={() => handleViewChange(lastNonChatViewRef.current || "home")} />}
           {view === "circles" && (
