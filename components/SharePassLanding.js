@@ -129,6 +129,7 @@ function RememberedAccountButton({ account, actionLabel, onClick, disabled }) {
 
 export default function SharePassLanding() {
   const router = useRouter();
+  const hasRealGoogleOAuth = Boolean(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
   const [theme, setTheme] = useState("dark");
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetView, setSheetView] = useState("methods");
@@ -305,6 +306,18 @@ export default function SharePassLanding() {
 
       saveSharePassSession(window.localStorage, sessionProfile);
       refreshSavedAccounts();
+
+      if (method !== "guest") {
+        await fetch("/api/users", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionProfile,
+          }),
+        }).catch(() => null);
+      }
 
       await new Promise(resolve => {
         window.setTimeout(resolve, 220);
@@ -486,7 +499,33 @@ export default function SharePassLanding() {
         <Icon.Google />,
         "Google Authorization",
         "Choose a Google account",
-        "Select a remembered Google account or add another one, then we authorize it locally and move you into the app.",
+        hasRealGoogleOAuth
+          ? "Use Google's real account chooser for verified sign-in, or fall back to the local dev flow while your OAuth setup is still in progress."
+          : "Select a remembered Google account or add another one, then we authorize it locally and move you into the app.",
+      )}
+
+      {hasRealGoogleOAuth && (
+        <div className="entry-provider-block">
+          <div className="entry-provider-block-head">
+            <h3>Real Google sign-in</h3>
+            <span>Recommended</span>
+          </div>
+          <div className="entry-empty-note" style={{ marginBottom: 12 }}>
+            This uses Google&apos;s account chooser and verified email flow instead of a local-only mock session.
+          </div>
+          <button
+            className="sp-btn sp-btn-primary"
+            type="button"
+            onClick={() => {
+              if (typeof window !== "undefined") {
+                window.location.href = "/api/auth/google/start";
+              }
+            }}
+            disabled={isAuthorizing}
+          >
+            Continue With Real Google
+          </button>
+        </div>
       )}
 
       {savedAccounts.google.length > 0 ? (

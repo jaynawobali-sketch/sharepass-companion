@@ -3,9 +3,6 @@ import { useRouter } from "next/router";
 import Icon from "./Icon";
 import { EMOTIONS, formatRelativeTime, SEED_POSTS } from "../lib/sharepass-data";
 import {
-  createCircleFromDraft,
-  createCircleMember,
-  createCircleMessage,
   createCurrentMemberId,
   createSeedCircles,
   getCircleAudience,
@@ -41,6 +38,142 @@ async function requestJson(url, options = {}) {
   }
 
   return payload;
+}
+
+const BASE_NAV = [
+  { id: "home", label: "Chats", Ic: Icon.Chat },
+  { id: "express", label: "Express", Ic: Icon.Express },
+  { id: "chat", label: "AI Assist", Ic: Icon.Assistant },
+  { id: "circles", label: "Circles", Ic: Icon.Circles },
+];
+
+const DEFAULT_ADMIN_DATA = {
+  users: [],
+  feedback: [],
+  stats: {
+    totalCircles: 0,
+    liveCircles: 0,
+    totalUsers: 0,
+    openFeedback: 0,
+  },
+};
+
+function getCircleUnreadCount(circle, memberId) {
+  return Math.max(0, Number(circle?.unreadCounts?.[memberId] || 0));
+}
+
+function isCircleLive(circle) {
+  return Boolean(circle?.voiceSession?.active || circle?.speakers?.length > 0);
+}
+
+function sortCirclesByActivity(circles, currentUserId) {
+  return [...circles].sort((left, right) => {
+    const leftScore = (isCircleLive(left) ? 1000 : 0) + getCircleUnreadCount(left, currentUserId);
+    const rightScore = (isCircleLive(right) ? 1000 : 0) + getCircleUnreadCount(right, currentUserId);
+
+    if (leftScore !== rightScore) {
+      return rightScore - leftScore;
+    }
+
+    return new Date(right.lastActivityAt || right.createdAt) - new Date(left.lastActivityAt || left.createdAt);
+  });
+}
+
+function NotificationBadge({ value, tone = "default", live = false }) {
+  if (!value && !live) {
+    return null;
+  }
+
+  return (
+    <span className={`notification-badge ${tone} ${live ? "live" : ""}`}>
+      {live && !value ? "Live" : value}
+    </span>
+  );
+}
+
+function ViewTabs({ items, activeId, onChange }) {
+  return (
+    <div className="view-tabs" role="tablist">
+      {items.map(item => (
+        <button
+          key={item.id}
+          className={`view-tab ${activeId === item.id ? "active" : ""}`}
+          type="button"
+          role="tab"
+          aria-selected={activeId === item.id}
+          onClick={() => onChange(item.id)}
+        >
+          <span>{item.label}</span>
+          {item.badge ? (
+            <span className={`view-tab-badge ${item.badgeTone || "default"}`}>{item.badge}</span>
+          ) : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CirclePreviewCard({
+  circle,
+  currentUserId,
+  onDeleteCircle,
+  onJoinCircle,
+  onOpenCircle,
+  showManage = false,
+}) {
+  const joined = circle.members.some(member => member.id === currentUserId);
+  const previewColors = getCirclePreviewColors(circle);
+  const unreadCount = getCircleUnreadCount(circle, currentUserId);
+  const liveNow = isCircleLive(circle);
+
+  return (
+    <div className="circle-card">
+      <div className="circle-card-topline">
+        <div className="circle-header">
+          <span className="circle-icon">{circle.icon}</span>
+          <div>
+            <div className="circle-topic">{circle.topic}</div>
+            <div className="circle-members">{circle.members.length} members · {circle.schedule}</div>
+          </div>
+        </div>
+        <div className="circle-card-statuses">
+          <NotificationBadge value={unreadCount > 0 ? unreadCount : ""} tone="accent" />
+          <NotificationBadge live={liveNow} tone="success" />
+        </div>
+      </div>
+
+      <div className="sp-sub circle-card-description">{circle.description}</div>
+
+      <div className="circle-card-meta-row">
+        <div className="member-dots">
+          {previewColors.map((color, index) => (
+            <div key={`${circle.id}-${index}`} className="member-dot" style={{ background: color }} />
+          ))}
+          <span className="circle-card-inline-meta">
+            {circle.speakers.length} on the floor · {circle.requestQueue.length} hands raised
+          </span>
+        </div>
+        <div className="circle-card-actions">
+          {joined ? (
+            <button className="join-btn" type="button" onClick={() => onOpenCircle(circle.id)}>
+              Open Space
+              <Icon.Forward />
+            </button>
+          ) : (
+            <button className="join-btn" type="button" onClick={() => onJoinCircle(circle.id)}>
+              Join Circle
+              <Icon.Forward />
+            </button>
+          )}
+          {showManage && (
+            <button className="sp-btn sp-btn-ghost circle-manage-delete" type="button" onClick={() => onDeleteCircle(circle.id)}>
+              Delete
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── COMPONENTS ───────────────────────────────────────────────────────────────
@@ -664,15 +797,18 @@ function CircleMessageRow({ message }) {
 function CirclesView({
   circles,
   activeCircleId,
+  circlesLoading,
   currentMood,
   isGuest,
   isSuperAdmin,
   onBackToDirectory,
   onCreateCircle,
+  onDeleteCircle,
   onJoinCircle,
   onMoveToAudience,
   onOpenCircle,
   onPostAnnouncement,
+  onRemoveCircleMember,
   onRequireAccount,
   onSendCircleMessage,
   onToggleHand,
@@ -688,15 +824,42 @@ function CirclesView({
     schedule: "",
     icon: "🫶",
   });
+  const [directoryTab, setDirectoryTab] = useState("discover");
+  const [roomTab, setRoomTab] = useState("overview");
 
   useEffect(() => {
     setChatDraft("");
     setAnnouncementDraft("");
+    setRoomTab("overview");
   }, [activeCircleId]);
 
   const currentUserId = createCurrentMemberId(sessionProfile);
   const activeCircle = circles.find(circle => circle.id === activeCircleId) || null;
   const joinedCircles = circles.filter(circle => circle.members.some(member => member.id === currentUserId));
+  const totalUnread = joinedCircles.reduce((sum, circle) => sum + getCircleUnreadCount(circle, currentUserId), 0);
+  const liveJoinedCount = joinedCircles.filter(circle => isCircleLive(circle)).length;
+
+  const renderCircleList = (items, options = {}) => {
+    if (items.length === 0) {
+      return <div className="circle-empty-note">{options.emptyMessage}</div>;
+    }
+
+    return (
+      <div className="circle-directory-grid">
+        {items.map(circle => (
+          <CirclePreviewCard
+            key={circle.id}
+            circle={circle}
+            currentUserId={currentUserId}
+            onDeleteCircle={onDeleteCircle}
+            onJoinCircle={onJoinCircle}
+            onOpenCircle={onOpenCircle}
+            showManage={options.showManage}
+          />
+        ))}
+      </div>
+    );
+  };
 
   if (isGuest) {
     return (
@@ -718,6 +881,14 @@ function CirclesView({
     const latestAnnouncement = activeCircle.announcements[0] || null;
     const isCurrentUserSpeaker = activeCircle.speakers.includes(currentUserId);
     const isCurrentUserQueued = activeCircle.requestQueue.includes(currentUserId);
+    const currentUnreadCount = getCircleUnreadCount(activeCircle, currentUserId);
+    const roomTabs = [
+      { id: "overview", label: "Overview" },
+      { id: "stage", label: "Voice Floor", badge: isCircleLive(activeCircle) ? "Live" : "", badgeTone: "success" },
+      { id: "chat", label: "Chat", badge: currentUnreadCount > 0 ? String(currentUnreadCount) : "", badgeTone: "accent" },
+      { id: "members", label: "Members", badge: String(activeCircle.members.length) },
+      ...(isSuperAdmin ? [{ id: "admin", label: "Admin" }] : []),
+    ];
 
     return (
       <div className="sp-panel">
@@ -733,174 +904,254 @@ function CirclesView({
             <div className="assistant-glance-pill">{activeCircle.schedule}</div>
             <div className="assistant-glance-pill">{activeCircle.members.length} joined</div>
             <div className="assistant-glance-pill">{activeCircle.allowRequests ? "Raise hand on" : "Raise hand paused"}</div>
+            {isCircleLive(activeCircle) ? <div className="assistant-glance-pill">Live voice</div> : null}
           </div>
         </div>
 
-        {latestAnnouncement && (
-          <div className="circle-announce-banner">
-            <div className="circle-announce-copy">
-              <span className="sp-label">Latest admin note</span>
-              <strong>{latestAnnouncement.title}</strong>
-              <p>{latestAnnouncement.body}</p>
+        <ViewTabs items={roomTabs} activeId={roomTab} onChange={setRoomTab} />
+
+        {roomTab === "overview" && (
+          <div className="circle-room-stack">
+            <div className="circle-stage-card">
+              <div className="circle-card-head">
+                <div>
+                  <div className="sp-label">Room Snapshot</div>
+                  <div className="sp-h2">{activeCircle.stageTopic}</div>
+                  <div className="sp-sub" style={{ marginTop: 6 }}>{activeCircle.hostNote}</div>
+                </div>
+                <span className={`circle-room-status ${activeCircle.allowRequests ? "open" : "paused"}`}>
+                  {activeCircle.allowRequests ? "Requests Open" : "Requests Paused"}
+                </span>
+              </div>
+
+              <div className="circle-room-actions">
+                {!currentMember && (
+                  <button className="sp-btn sp-btn-primary" type="button" onClick={() => onJoinCircle(activeCircle.id)}>
+                    Join Circle
+                    <Icon.Forward />
+                  </button>
+                )}
+
+                {currentMember && !isCurrentUserSpeaker && (
+                  <button
+                    className={`sp-btn ${isCurrentUserQueued ? "sp-btn-ghost" : "sp-btn-primary"}`}
+                    type="button"
+                    onClick={() => onToggleHand(activeCircle.id)}
+                    disabled={!activeCircle.allowRequests && !isCurrentUserQueued}
+                  >
+                    {isCurrentUserQueued ? "Lower Hand" : "Raise Hand"}
+                  </button>
+                )}
+
+                {currentMember && isCurrentUserSpeaker && (
+                  <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onMoveToAudience(activeCircle.id, currentUserId)}>
+                    Move To Audience
+                  </button>
+                )}
+
+                <button className="sp-btn sp-btn-ghost" type="button" onClick={() => setRoomTab("chat")}>
+                  Open Chat
+                </button>
+              </div>
             </div>
-            <span className="circle-announce-time">{formatRelativeTime(latestAnnouncement.createdAt)}</span>
+
+            <div className="circle-support-grid">
+              {latestAnnouncement ? (
+                <div className="circle-announce-banner">
+                  <div className="circle-announce-copy">
+                    <span className="sp-label">Latest admin note</span>
+                    <strong>{latestAnnouncement.title}</strong>
+                    <p>{latestAnnouncement.body}</p>
+                  </div>
+                  <span className="circle-announce-time">{formatRelativeTime(latestAnnouncement.createdAt)}</span>
+                </div>
+              ) : (
+                <div className="sp-card circle-presence-card">
+                  <strong>No admin note yet</strong>
+                  <p>This room has not received a fresh announcement yet, so the voice floor and chat are carrying the current tone.</p>
+                </div>
+              )}
+
+              <div className="sp-card">
+                <div className="sp-label">Your presence here</div>
+                <div className="circle-presence-card">
+                  <strong>{currentMember ? "You are part of this circle" : "You are not in this circle yet"}</strong>
+                  <p>
+                    {currentMember
+                      ? `You joined as ${currentMember.role === "moderator" ? "a moderator" : "a listener"} and your mood is currently marked as ${getMoodMeta(currentMood).label.toLowerCase()}.`
+                      : "Join the circle to listen in, chat with the group, and raise your hand when you are ready to speak."}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
-        <div className="circle-stage-card">
-          <div className="circle-card-head">
-            <div>
-              <div className="sp-label">Voice Floor</div>
-              <div className="sp-h2">{activeCircle.stageTopic}</div>
-              <div className="sp-sub" style={{ marginTop: 6 }}>{activeCircle.hostNote}</div>
-            </div>
-            <span className={`circle-room-status ${activeCircle.allowRequests ? "open" : "paused"}`}>
-              {activeCircle.allowRequests ? "Requests Open" : "Requests Paused"}
-            </span>
-          </div>
-
-          <div className="circle-room-actions">
-            {!currentMember && (
-              <button className="sp-btn sp-btn-primary" type="button" onClick={() => onJoinCircle(activeCircle.id)}>
-                Join Circle
-                <Icon.Forward />
-              </button>
-            )}
-
-            {currentMember && !isCurrentUserSpeaker && (
-              <button
-                className={`sp-btn ${isCurrentUserQueued ? "sp-btn-ghost" : "sp-btn-primary"}`}
-                type="button"
-                onClick={() => onToggleHand(activeCircle.id)}
-                disabled={!activeCircle.allowRequests && !isCurrentUserQueued}
-              >
-                {isCurrentUserQueued ? "Lower Hand" : "Raise Hand"}
-              </button>
-            )}
-
-            {currentMember && isCurrentUserSpeaker && (
-              <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onMoveToAudience(activeCircle.id, currentUserId)}>
-                Move To Audience
-              </button>
-            )}
-
-            {isSuperAdmin && (
-              <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onToggleRequests(activeCircle.id)}>
-                {activeCircle.allowRequests ? "Pause Requests" : "Resume Requests"}
-              </button>
-            )}
-          </div>
-
-          <div className="circle-stage-grid">
-            <div className="circle-stage-column">
-              <div className="sp-label">Speaking Now</div>
-              <div className="circle-member-stack">
-                {speakers.length > 0 ? speakers.map(member => (
-                  <CircleMemberRow
-                    key={member.id}
-                    member={member}
-                    badge={member.role === "moderator" ? "Moderator" : "Speaker"}
-                    actionLabel={isSuperAdmin && member.role !== "moderator" ? "Audience" : undefined}
-                    onAction={isSuperAdmin && member.role !== "moderator" ? () => onMoveToAudience(activeCircle.id, member.id) : undefined}
-                  />
-                )) : <div className="circle-empty-note">No one is on the floor yet. A moderator can invite the first speaker.</div>}
+        {roomTab === "stage" && (
+          <div className="circle-stage-card">
+            <div className="circle-card-head">
+              <div>
+                <div className="sp-label">Voice Floor</div>
+                <div className="sp-h2">{activeCircle.stageTopic}</div>
+                <div className="sp-sub" style={{ marginTop: 6 }}>{activeCircle.hostNote}</div>
               </div>
+              <span className={`circle-room-status ${activeCircle.allowRequests ? "open" : "paused"}`}>
+                {activeCircle.allowRequests ? "Requests Open" : "Requests Paused"}
+              </span>
             </div>
 
-            <div className="circle-stage-column">
-              <div className="sp-label">Raised Hands</div>
-              <div className="circle-member-stack">
-                {queuedMembers.length > 0 ? queuedMembers.map(member => (
-                  <CircleMemberRow
-                    key={member.id}
-                    member={member}
-                    badge="Waiting"
-                    actionLabel={isSuperAdmin ? "Invite" : undefined}
-                    onAction={isSuperAdmin ? () => onInviteSpeaker(activeCircle.id, member.id) : undefined}
-                  />
-                )) : <div className="circle-empty-note">The queue is quiet right now. Members can raise a hand when they are ready.</div>}
-              </div>
+            <div className="circle-room-actions">
+              {!currentMember && (
+                <button className="sp-btn sp-btn-primary" type="button" onClick={() => onJoinCircle(activeCircle.id)}>
+                  Join Circle
+                  <Icon.Forward />
+                </button>
+              )}
+
+              {currentMember && !isCurrentUserSpeaker && (
+                <button
+                  className={`sp-btn ${isCurrentUserQueued ? "sp-btn-ghost" : "sp-btn-primary"}`}
+                  type="button"
+                  onClick={() => onToggleHand(activeCircle.id)}
+                  disabled={!activeCircle.allowRequests && !isCurrentUserQueued}
+                >
+                  {isCurrentUserQueued ? "Lower Hand" : "Raise Hand"}
+                </button>
+              )}
+
+              {currentMember && isCurrentUserSpeaker && (
+                <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onMoveToAudience(activeCircle.id, currentUserId)}>
+                  Move To Audience
+                </button>
+              )}
+
+              {isSuperAdmin && (
+                <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onToggleRequests(activeCircle.id)}>
+                  {activeCircle.allowRequests ? "Pause Requests" : "Resume Requests"}
+                </button>
+              )}
             </div>
 
-            <div className="circle-stage-column">
-              <div className="sp-label">Listening In</div>
-              <div className="circle-member-stack">
-                {audience.length > 0 ? audience.map(member => (
-                  <CircleMemberRow key={member.id} member={member} badge={member.id === currentUserId ? "You" : "Listening"} />
-                )) : <div className="circle-empty-note">Everyone currently listed is on the floor.</div>}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="circle-chat-card">
-          <div className="circle-card-head">
-            <div>
-              <div className="sp-label">Circle Chat</div>
-              <div className="sp-h2">Talk like a group thread</div>
-            </div>
-            <span className="circle-chat-hint">Share, laugh, encourage, or drop a resource after the speaker finishes.</span>
-          </div>
-
-          <div className="circle-chat-feed">
-            {activeCircle.chat.map(message => (
-              <CircleMessageRow key={message.id} message={message} />
-            ))}
-          </div>
-
-          {currentMember ? (
-            <div className="circle-chat-composer">
-              <textarea
-                className="chat-input chat-input-multiline"
-                placeholder="Write into the circle chat..."
-                value={chatDraft}
-                rows={1}
-                onChange={event => setChatDraft(event.target.value)}
-              />
-              <button
-                className="chat-send-btn"
-                type="button"
-                disabled={!chatDraft.trim()}
-                onClick={() => {
-                  onSendCircleMessage(activeCircle.id, chatDraft);
-                  setChatDraft("");
-                }}
-              >
-                <Icon.Send />
-              </button>
-            </div>
-          ) : (
-            <div className="circle-empty-note">Join the circle first so your messages and raised hands are tied to your identity in this room.</div>
-          )}
-        </div>
-
-        <div className="circle-support-grid">
-          <div className="sp-card">
-            <div className="sp-label">How this room works</div>
-            <div className="circle-guideline-list">
-              {activeCircle.guidelines.map(line => (
-                <div key={line} className="circle-guideline-item">
-                  <span className="entry-preview-line-dot" />
-                  <span>{line}</span>
+            <div className="circle-stage-grid">
+              <div className="circle-stage-column">
+                <div className="sp-label">Speaking Now</div>
+                <div className="circle-member-stack">
+                  {speakers.length > 0 ? speakers.map(member => (
+                    <CircleMemberRow
+                      key={member.id}
+                      member={member}
+                      badge={member.role === "moderator" ? "Moderator" : "Speaker"}
+                      actionLabel={isSuperAdmin && member.role !== "moderator" ? "Audience" : undefined}
+                      onAction={isSuperAdmin && member.role !== "moderator" ? () => onMoveToAudience(activeCircle.id, member.id) : undefined}
+                    />
+                  )) : <div className="circle-empty-note">No one is on the floor yet. A moderator can invite the first speaker.</div>}
                 </div>
+              </div>
+
+              <div className="circle-stage-column">
+                <div className="sp-label">Raised Hands</div>
+                <div className="circle-member-stack">
+                  {queuedMembers.length > 0 ? queuedMembers.map(member => (
+                    <CircleMemberRow
+                      key={member.id}
+                      member={member}
+                      badge="Waiting"
+                      actionLabel={isSuperAdmin ? "Invite" : undefined}
+                      onAction={isSuperAdmin ? () => onInviteSpeaker(activeCircle.id, member.id) : undefined}
+                    />
+                  )) : <div className="circle-empty-note">The queue is quiet right now. Members can raise a hand when they are ready.</div>}
+                </div>
+              </div>
+
+              <div className="circle-stage-column">
+                <div className="sp-label">Listening In</div>
+                <div className="circle-member-stack">
+                  {audience.length > 0 ? audience.map(member => (
+                    <CircleMemberRow key={member.id} member={member} badge={member.id === currentUserId ? "You" : "Listening"} />
+                  )) : <div className="circle-empty-note">Everyone currently listed is on the floor.</div>}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {roomTab === "chat" && (
+          <div className="circle-chat-card">
+            <div className="circle-card-head">
+              <div>
+                <div className="sp-label">Circle Chat</div>
+                <div className="sp-h2">Talk like a group thread</div>
+              </div>
+              <span className="circle-chat-hint">Share, laugh, encourage, or drop a resource after the speaker finishes.</span>
+            </div>
+
+            <div className="circle-chat-feed">
+              {activeCircle.chat.map(message => (
+                <CircleMessageRow key={message.id} message={message} />
               ))}
             </div>
-          </div>
 
-          <div className="sp-card">
-            <div className="sp-label">Your presence here</div>
-            <div className="circle-presence-card">
-              <strong>{currentMember ? "You are part of this circle" : "You are not in this circle yet"}</strong>
-              <p>
-                {currentMember
-                  ? `You joined as ${currentMember.role === "moderator" ? "a moderator" : "a listener"} and your mood is currently marked as ${getMoodMeta(currentMood).label.toLowerCase()}.`
-                  : "Join the circle to listen in, chat with the group, and raise your hand when you are ready to speak."}
-              </p>
+            {currentMember ? (
+              <div className="circle-chat-composer">
+                <textarea
+                  className="chat-input chat-input-multiline"
+                  placeholder="Write into the circle chat..."
+                  value={chatDraft}
+                  rows={1}
+                  onChange={event => setChatDraft(event.target.value)}
+                />
+                <button
+                  className="chat-send-btn"
+                  type="button"
+                  disabled={!chatDraft.trim()}
+                  onClick={() => {
+                    onSendCircleMessage(activeCircle.id, chatDraft);
+                    setChatDraft("");
+                  }}
+                >
+                  <Icon.Send />
+                </button>
+              </div>
+            ) : (
+              <div className="circle-empty-note">Join the circle first so your messages and raised hands are tied to your identity in this room.</div>
+            )}
+          </div>
+        )}
+
+        {roomTab === "members" && (
+          <div className="circle-room-stack">
+            <div className="circle-support-grid">
+              <div className="sp-card">
+                <div className="sp-label">How this room works</div>
+                <div className="circle-guideline-list">
+                  {activeCircle.guidelines.map(line => (
+                    <div key={line} className="circle-guideline-item">
+                      <span className="entry-preview-line-dot" />
+                      <span>{line}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="sp-card">
+                <div className="sp-label">People in this room</div>
+                <div className="circle-member-stack">
+                  {activeCircle.members.map(member => (
+                    <CircleMemberRow
+                      key={member.id}
+                      member={member}
+                      badge={member.role === "moderator" ? "Moderator" : member.id === currentUserId ? "You" : "Member"}
+                      actionLabel={isSuperAdmin && member.id !== currentUserId ? "Remove" : undefined}
+                      onAction={isSuperAdmin && member.id !== currentUserId ? () => onRemoveCircleMember(activeCircle.id, member.id) : undefined}
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
-        {isSuperAdmin && (
+        {roomTab === "admin" && isSuperAdmin && (
           <div className="circle-admin-card">
             <div className="circle-card-head">
               <div>
@@ -928,6 +1179,9 @@ function CirclesView({
               >
                 Post Announcement
               </button>
+              <button className="sp-btn sp-btn-ghost circle-danger-btn" type="button" onClick={() => onDeleteCircle(activeCircle.id)}>
+                Delete Circle
+              </button>
             </div>
           </div>
         )}
@@ -935,138 +1189,150 @@ function CirclesView({
     );
   }
 
+  const directoryTabs = [
+    { id: "discover", label: "Discover", badge: String(circles.length) },
+    { id: "joined", label: "Joined", badge: joinedCircles.length > 0 ? String(joinedCircles.length) : "" },
+    { id: "activity", label: "Activity", badge: totalUnread > 0 ? String(totalUnread) : liveJoinedCount > 0 ? `${liveJoinedCount} live` : "", badgeTone: totalUnread > 0 ? "accent" : "success" },
+    ...(isSuperAdmin ? [{ id: "manage", label: "Manage" }] : []),
+  ];
+  const activityCircles = sortCirclesByActivity(joinedCircles.length > 0 ? joinedCircles : circles, currentUserId);
+
   return (
     <div className="sp-panel">
       <div style={{ marginBottom: 22 }}>
         <div className="sp-h1">Support Circles</div>
-        <div className="sp-sub">Join a circle, move into the live room, raise your hand when you need the floor, and keep chatting together between turns.</div>
+        <div className="sp-sub">Join a circle, move into the live room, raise your hand when you need the floor, and keep chatting together between turns without the page turning into one long stack.</div>
       </div>
 
-      {joinedCircles.length > 0 && (
-        <div className="sp-card circle-joined-strip">
-          <div className="sp-label">Your joined spaces</div>
-          <div className="circle-joined-list">
-            {joinedCircles.map(circle => (
-              <button key={circle.id} className="circle-room-pill" type="button" onClick={() => onOpenCircle(circle.id)}>
-                <span>{circle.icon}</span>
-                {circle.topic}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <ViewTabs items={directoryTabs} activeId={directoryTab} onChange={setDirectoryTab} />
 
-      {isSuperAdmin && (
-        <div className="sp-card circle-create-card">
-          <div className="circle-card-head">
-            <div>
-              <div className="sp-label">Super Admin Console</div>
-              <div className="sp-h2">Create and manage circles</div>
-            </div>
-            <span className="circle-room-status open">Moderator Tools</span>
-          </div>
-          <div className="circle-form-grid">
-            <label className="entry-form-field">
-              <span>Circle icon</span>
-              <input
-                type="text"
-                maxLength={4}
-                value={circleDraft.icon}
-                onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, icon: event.target.value }))}
-              />
-            </label>
-            <label className="entry-form-field">
-              <span>Schedule</span>
-              <input
-                type="text"
-                placeholder="Mondays · 7:00 PM"
-                value={circleDraft.schedule}
-                onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, schedule: event.target.value }))}
-              />
-            </label>
-          </div>
-          <label className="entry-form-field">
-            <span>Circle topic</span>
-            <input
-              type="text"
-              placeholder="Grief, burnout, study pressure..."
-              value={circleDraft.topic}
-              onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, topic: event.target.value }))}
-            />
-          </label>
-          <label className="entry-form-field">
-            <span>Description</span>
-            <textarea
-              className="safe-editor"
-              rows={3}
-              placeholder="Describe what this circle is for and how people can use it."
-              value={circleDraft.description}
-              onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, description: event.target.value }))}
-            />
-          </label>
-          <div className="sp-input-row">
-            <button
-              className="sp-btn sp-btn-primary"
-              type="button"
-              disabled={!circleDraft.topic.trim() || !circleDraft.description.trim() || !circleDraft.schedule.trim()}
-              onClick={() => {
-                onCreateCircle(circleDraft);
-                setCircleDraft({ topic: "", description: "", schedule: "", icon: "🫶" });
-              }}
-            >
-              Create Circle
-            </button>
-          </div>
-        </div>
-      )}
+      {circlesLoading && circles.length === 0 ? (
+        <div className="circle-empty-note">Loading circles from the shared data store…</div>
+      ) : null}
 
-      {circles.map(circle => {
-        const joined = circle.members.some(member => member.id === currentUserId);
-        const previewColors = getCirclePreviewColors(circle);
-
-        return (
-          <div key={circle.id} className="circle-card">
-            <div className="circle-header">
-              <span className="circle-icon">{circle.icon}</span>
-              <div>
-                <div className="circle-topic">{circle.topic}</div>
-                <div className="circle-members">{circle.members.length} members · {circle.schedule}</div>
-              </div>
-            </div>
-
-            <div className="sp-sub" style={{ marginBottom: 14 }}>{circle.description}</div>
-
-            <div className="circle-card-meta-row">
-              <div className="member-dots">
-                {previewColors.map((color, index) => (
-                  <div key={`${circle.id}-${index}`} className="member-dot" style={{ background: color }} />
-                ))}
-                <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 14 }}>
-                  {circle.speakers.length} on the floor · {circle.requestQueue.length} hands raised
-                </span>
-              </div>
-              <div className="circle-card-actions">
-                {joined ? (
-                  <button className="join-btn" type="button" onClick={() => onOpenCircle(circle.id)}>
-                    Open Space
-                    <Icon.Forward />
-                  </button>
-                ) : (
-                  <button className="join-btn" type="button" onClick={() => onJoinCircle(circle.id)}>
-                    Join Circle
-                    <Icon.Forward />
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        );
+      {directoryTab === "discover" && renderCircleList(circles, {
+        emptyMessage: "No circles are available yet. A moderator can create one from the manage tab.",
       })}
+
+      {directoryTab === "joined" && (
+        <div className="circle-room-stack">
+          {joinedCircles.length > 0 && (
+            <div className="sp-card circle-joined-strip">
+              <div className="sp-label">Your joined spaces</div>
+              <div className="circle-joined-list">
+                {joinedCircles.map(circle => (
+                  <button key={circle.id} className="circle-room-pill" type="button" onClick={() => onOpenCircle(circle.id)}>
+                    <span>{circle.icon}</span>
+                    {circle.topic}
+                    <NotificationBadge value={getCircleUnreadCount(circle, currentUserId) > 0 ? String(getCircleUnreadCount(circle, currentUserId)) : ""} tone="accent" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {renderCircleList(joinedCircles, {
+            emptyMessage: "Join a circle first, then it will appear here so you can jump back into the room quickly.",
+          })}
+        </div>
+      )}
+
+      {directoryTab === "activity" && (
+        <div className="circle-room-stack">
+          <div className="sp-card circle-activity-summary">
+            <div className="circle-card-head">
+              <div>
+                <div className="sp-label">Room activity</div>
+                <div className="sp-h2">Unread chats and live rooms</div>
+              </div>
+              <div className="circle-card-statuses">
+                <NotificationBadge value={totalUnread > 0 ? String(totalUnread) : ""} tone="accent" />
+                <NotificationBadge value={liveJoinedCount > 0 ? `${liveJoinedCount} live` : ""} tone="success" />
+              </div>
+            </div>
+            <div className="sp-sub">Unread group chat and active voice rooms float to the top here so you can jump back into what needs your attention.</div>
+          </div>
+          {renderCircleList(activityCircles, {
+            emptyMessage: "No live room or unread activity is waiting for you right now.",
+          })}
+        </div>
+      )}
+
+      {directoryTab === "manage" && isSuperAdmin && (
+        <div className="circle-manage-stack">
+          <div className="sp-card circle-create-card">
+            <div className="circle-card-head">
+              <div>
+                <div className="sp-label">Super Admin Console</div>
+                <div className="sp-h2">Create and manage circles</div>
+              </div>
+              <span className="circle-room-status open">Moderator Tools</span>
+            </div>
+            <div className="circle-form-grid">
+              <label className="entry-form-field">
+                <span>Circle icon</span>
+                <input
+                  type="text"
+                  maxLength={4}
+                  value={circleDraft.icon}
+                  onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, icon: event.target.value }))}
+                />
+              </label>
+              <label className="entry-form-field">
+                <span>Schedule</span>
+                <input
+                  type="text"
+                  placeholder="Mondays · 7:00 PM"
+                  value={circleDraft.schedule}
+                  onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, schedule: event.target.value }))}
+                />
+              </label>
+            </div>
+            <label className="entry-form-field">
+              <span>Circle topic</span>
+              <input
+                type="text"
+                placeholder="Grief, burnout, study pressure..."
+                value={circleDraft.topic}
+                onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, topic: event.target.value }))}
+              />
+            </label>
+            <label className="entry-form-field">
+              <span>Description</span>
+              <textarea
+                className="safe-editor"
+                rows={3}
+                placeholder="Describe what this circle is for and how people can use it."
+                value={circleDraft.description}
+                onChange={event => setCircleDraft(currentDraft => ({ ...currentDraft, description: event.target.value }))}
+              />
+            </label>
+            <div className="sp-input-row">
+              <button
+                className="sp-btn sp-btn-primary"
+                type="button"
+                disabled={!circleDraft.topic.trim() || !circleDraft.description.trim() || !circleDraft.schedule.trim()}
+                onClick={() => {
+                  onCreateCircle(circleDraft);
+                  setCircleDraft({ topic: "", description: "", schedule: "", icon: "🫶" });
+                }}
+              >
+                Create Circle
+              </button>
+            </div>
+          </div>
+
+          {renderCircleList(circles, {
+            showManage: true,
+            emptyMessage: "No circles are available to manage yet.",
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
 function ProfileView({
+  currentUserId,
   currentMood,
   isSuperAdmin,
   joinedCircles,
@@ -1075,6 +1341,7 @@ function ProfileView({
   onMoodChange,
   onOpenCircle,
   privacyState,
+  onSubmitFeedback,
   onPrivacyToggle,
   username,
 }) {
@@ -1084,6 +1351,11 @@ function ProfileView({
     ["Hide from search", "hideSearch"],
   ];
   const mood = getMoodMeta(currentMood);
+  const [feedbackCategory, setFeedbackCategory] = useState("complaint");
+  const [feedbackSubject, setFeedbackSubject] = useState("");
+  const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackNotice, setFeedbackNotice] = useState("");
 
   return (
     <div className="sp-panel">
@@ -1091,99 +1363,347 @@ function ProfileView({
         <div className="sp-h1">Your Space</div>
         <div className="sp-sub">Your identity, mood, joined circles, and session controls all stay together here.</div>
       </div>
-      <div className="sp-card" style={{ marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18 }}>
-          <div className="profile-avatar"><Icon.Leaf /></div>
-          <div>
-            <div className="sp-h2">{username}</div>
-            <div className="sp-sub" style={{ marginTop: 2 }}>
-              {isSuperAdmin ? "Super admin · manages circles and room announcements" : "Signed-in identity · protected and quiet"}
+      <div className="profile-stack">
+        <div className="sp-card">
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18 }}>
+            <div className="profile-avatar"><Icon.Leaf /></div>
+            <div>
+              <div className="sp-h2">{username}</div>
+              <div className="sp-sub" style={{ marginTop: 2 }}>
+                {isSuperAdmin ? "Super admin · manages circles and room announcements" : "Signed-in identity · protected and quiet"}
+              </div>
+            </div>
+          </div>
+          <div className="sp-label">Your state right now</div>
+          {[["Today's mood", `${mood.icon} ${mood.label}`],["Circles joined", String(joinedCircles.length)],["Room role", isSuperAdmin ? "Super admin" : "Member"]].map(([label, val]) => (
+            <div key={label} className="stat-row">
+              <span className="stat-label"><Icon.Forward /> {label}</span>
+              <span className="stat-val">{val}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="sp-card">
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
+            <Icon.Heart />
+            <div className="sp-label" style={{ marginBottom: 0 }}>Today&apos;s Mood</div>
+          </div>
+          <div className="mood-grid mood-grid-expanded">
+            {EMOTIONS.map(emotion => (
+              <button
+                key={emotion.id}
+                className={`mood-chip ${currentMood === emotion.id ? "active" : ""}`}
+                type="button"
+                onClick={() => onMoodChange(emotion.id)}
+              >
+                <span>{emotion.icon}</span>
+                <small>{emotion.label}</small>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="sp-card">
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
+            <Icon.Circles />
+            <div className="sp-label" style={{ marginBottom: 0 }}>Your Circle Spaces</div>
+          </div>
+          {joinedCircles.length > 0 ? joinedCircles.map(circle => (
+            <button key={circle.id} className="circle-link-card" type="button" onClick={() => onOpenCircle(circle.id)}>
+              <span className="circle-link-icon">{circle.icon}</span>
+              <span className="circle-link-copy">
+                <strong>{circle.topic}</strong>
+                <span>{circle.members.length} members · {circle.schedule}</span>
+              </span>
+              <div className="circle-card-statuses">
+                <NotificationBadge value={getCircleUnreadCount(circle, currentUserId) > 0 ? String(getCircleUnreadCount(circle, currentUserId)) : ""} tone="accent" />
+                <NotificationBadge live={isCircleLive(circle)} tone="success" />
+              </div>
+              <Icon.Forward />
+            </button>
+          )) : (
+            <div className="circle-empty-note">Join a circle first, then it will appear here so you can jump back into the room quickly.</div>
+          )}
+        </div>
+
+        <div className="sp-card">
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
+            <Icon.Privacy />
+            <div className="sp-label" style={{ marginBottom: 0 }}>Privacy Controls</div>
+          </div>
+          {controls.map(([label, key]) => (
+            <div key={key} className="stat-row">
+              <span className="stat-label" style={{ fontSize: 12.5 }}>{label}</span>
+              <ToggleSwitch on={privacyState[key]} onToggle={() => onPrivacyToggle(key)} />
+            </div>
+          ))}
+        </div>
+
+        <div className="sp-card">
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
+            <Icon.Shield />
+            <div className="sp-label" style={{ marginBottom: 0 }}>Feedback & complaints</div>
+          </div>
+          <div className="feedback-form">
+            <label className="entry-form-field">
+              <span>Type</span>
+              <select value={feedbackCategory} onChange={event => setFeedbackCategory(event.target.value)}>
+                <option value="complaint">Complaint</option>
+                <option value="bug">Bug</option>
+                <option value="moderation">Moderation concern</option>
+                <option value="praise">Good feedback</option>
+              </select>
+            </label>
+            <label className="entry-form-field">
+              <span>Subject</span>
+              <input
+                type="text"
+                value={feedbackSubject}
+                placeholder="What happened?"
+                onChange={event => setFeedbackSubject(event.target.value)}
+              />
+            </label>
+            <label className="entry-form-field">
+              <span>Details</span>
+              <textarea
+                className="safe-editor"
+                rows={3}
+                value={feedbackMessage}
+                placeholder="Share what went wrong, what went well, or what needs attention."
+                onChange={event => setFeedbackMessage(event.target.value)}
+              />
+            </label>
+            {feedbackNotice ? <div className="circle-empty-note">{feedbackNotice}</div> : null}
+            <div className="sp-input-row">
+              <button
+                className="sp-btn sp-btn-primary"
+                type="button"
+                disabled={feedbackSubmitting || !feedbackSubject.trim() || !feedbackMessage.trim()}
+                onClick={async () => {
+                  setFeedbackSubmitting(true);
+                  setFeedbackNotice("");
+
+                  try {
+                    await onSubmitFeedback({
+                      category: feedbackCategory,
+                      subject: feedbackSubject,
+                      message: feedbackMessage,
+                    });
+
+                    setFeedbackNotice("Your feedback was saved and is now visible in the admin review queue.");
+                    setFeedbackSubject("");
+                    setFeedbackMessage("");
+                    setFeedbackCategory("complaint");
+                  } catch (error) {
+                    setFeedbackNotice(error.message);
+                  } finally {
+                    setFeedbackSubmitting(false);
+                  }
+                }}
+              >
+                {feedbackSubmitting ? "Sending…" : "Send Feedback"}
+              </button>
             </div>
           </div>
         </div>
-        <div className="sp-label">Your state right now</div>
-        {[["Today's mood", `${mood.icon} ${mood.label}`],["Circles joined", String(joinedCircles.length)],["Room role", isSuperAdmin ? "Super admin" : "Member"]].map(([label, val]) => (
-          <div key={label} className="stat-row">
-            <span className="stat-label"><Icon.Forward /> {label}</span>
-            <span className="stat-val">{val}</span>
+
+        <div className="sp-card profile-session-card">
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
+            <Icon.Shield />
+            <div className="sp-label" style={{ marginBottom: 0 }}>Session</div>
           </div>
-        ))}
-      </div>
-      <div className="sp-card">
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
-          <Icon.Heart />
-          <div className="sp-label" style={{ marginBottom: 0 }}>Today&apos;s Mood</div>
+          <div className="sp-sub" style={{ marginBottom: 16 }}>
+            Logging out will end this local anonymous session and take you back to the landing page.
+          </div>
+          <button className="sp-btn sp-btn-ghost profile-logout-btn" onClick={onLogout} type="button" disabled={loggingOut}>
+            {loggingOut ? "Logging out..." : "Log Out"}
+          </button>
         </div>
-        <div className="mood-grid mood-grid-expanded">
-          {EMOTIONS.map(emotion => (
-            <button
-              key={emotion.id}
-              className={`mood-chip ${currentMood === emotion.id ? "active" : ""}`}
-              type="button"
-              onClick={() => onMoodChange(emotion.id)}
-            >
-              <span>{emotion.icon}</span>
-              <small>{emotion.label}</small>
-            </button>
+      </div>
+    </div>
+  );
+}
+
+function AdminView({
+  adminData,
+  adminLoading,
+  circles,
+  currentUserEmail,
+  isSuperAdmin,
+  onDeleteCircle,
+  onDeleteUser,
+  onOpenCircle,
+  onUpdateFeedbackStatus,
+}) {
+  const [adminTab, setAdminTab] = useState("overview");
+
+  if (!isSuperAdmin) {
+    return (
+      <div className="sp-panel">
+        <div className="sp-card access-gate-card">
+          <div className="section-pill">
+            <Icon.Lock />
+            Admin Only
+          </div>
+          <div className="sp-h1">Admin access only.</div>
+          <div className="sp-sub">This dashboard is reserved for admin-approved email accounts.</div>
+        </div>
+      </div>
+    );
+  }
+
+  const stats = adminData.stats || DEFAULT_ADMIN_DATA.stats;
+  const adminTabs = [
+    { id: "overview", label: "Overview" },
+    { id: "circles", label: "Circles", badge: String(circles.length) },
+    { id: "people", label: "People", badge: adminData.users.length > 0 ? String(adminData.users.length) : "" },
+    { id: "feedback", label: "Feedback", badge: adminData.feedback.filter(item => item.status !== "resolved").length > 0 ? String(adminData.feedback.filter(item => item.status !== "resolved").length) : "" },
+  ];
+
+  return (
+    <div className="sp-panel">
+      <div style={{ marginBottom: 22 }}>
+        <div className="sp-h1">Admin Dashboard</div>
+        <div className="sp-sub">Manage circles, review member reports, and keep the support rooms healthy from one place.</div>
+      </div>
+
+      <ViewTabs items={adminTabs} activeId={adminTab} onChange={setAdminTab} />
+
+      {adminLoading ? <div className="circle-empty-note">Loading admin data from the shared store…</div> : null}
+
+      {adminTab === "overview" && (
+        <div className="admin-grid">
+          {[
+            ["Circles", String(stats.totalCircles)],
+            ["Live voice rooms", String(stats.liveCircles)],
+            ["Saved users", String(stats.totalUsers)],
+            ["Open reports", String(stats.openFeedback)],
+          ].map(([label, value]) => (
+            <div key={label} className="sp-card admin-summary-card">
+              <div className="sp-label">{label}</div>
+              <div className="admin-summary-value">{value}</div>
+            </div>
           ))}
         </div>
-      </div>
-      <div className="sp-card">
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
-          <Icon.Circles />
-          <div className="sp-label" style={{ marginBottom: 0 }}>Your Circle Spaces</div>
+      )}
+
+      {adminTab === "circles" && (
+        <div className="circle-directory-grid">
+          {circles.map(circle => (
+            <div key={circle.id} className="sp-card admin-list-card">
+              <div className="circle-card-head">
+                <div>
+                  <div className="sp-label">Circle</div>
+                  <div className="sp-h2">{circle.icon} {circle.topic}</div>
+                  <div className="sp-sub">{circle.members.length} members · {circle.schedule}</div>
+                </div>
+                <div className="circle-card-statuses">
+                  <NotificationBadge live={isCircleLive(circle)} tone="success" />
+                </div>
+              </div>
+              <div className="sp-input-row">
+                <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onOpenCircle(circle.id)}>
+                  Open Room
+                </button>
+                <button className="sp-btn sp-btn-ghost circle-danger-btn" type="button" onClick={() => onDeleteCircle(circle.id)}>
+                  Delete Circle
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
-        {joinedCircles.length > 0 ? joinedCircles.map(circle => (
-          <button key={circle.id} className="circle-link-card" type="button" onClick={() => onOpenCircle(circle.id)}>
-            <span className="circle-link-icon">{circle.icon}</span>
-            <span className="circle-link-copy">
-              <strong>{circle.topic}</strong>
-              <span>{circle.members.length} members · {circle.schedule}</span>
-            </span>
-            <Icon.Forward />
-          </button>
-        )) : (
-          <div className="circle-empty-note">Join a circle first, then it will appear here so you can jump back into the room quickly.</div>
-        )}
-      </div>
-      <div className="sp-card">
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
-          <Icon.Privacy />
-          <div className="sp-label" style={{ marginBottom: 0 }}>Privacy Controls</div>
+      )}
+
+      {adminTab === "people" && (
+        <div className="admin-list-stack">
+          {adminData.users.length > 0 ? adminData.users.map(user => (
+            <div key={user.email} className="sp-card admin-list-card">
+              <div className="circle-card-head">
+                <div>
+                  <div className="sp-h2">{user.displayName || user.username}</div>
+                  <div className="sp-sub">{user.email}</div>
+                </div>
+                <span className={`circle-room-status ${user.role === "super-admin" ? "open" : "paused"}`}>
+                  {user.role === "super-admin" ? "Admin" : "Member"}
+                </span>
+              </div>
+              <div className="stat-row">
+                <span className="stat-label">Joined circles</span>
+                <span className="stat-val">{user.joinedCircleIds?.length || 0}</span>
+              </div>
+              <div className="stat-row">
+                <span className="stat-label">Current mood</span>
+                <span className="stat-val">{user.currentMood || "unknown"}</span>
+              </div>
+              <div className="sp-input-row">
+                <button
+                  className="sp-btn sp-btn-ghost circle-danger-btn"
+                  type="button"
+                  disabled={user.email === currentUserEmail}
+                  onClick={() => onDeleteUser(user.email)}
+                >
+                  {user.email === currentUserEmail ? "Current Admin" : "Delete User"}
+                </button>
+              </div>
+            </div>
+          )) : (
+            <div className="circle-empty-note">No saved user records are available yet.</div>
+          )}
         </div>
-        {controls.map(([label, key]) => (
-          <div key={key} className="stat-row">
-            <span className="stat-label" style={{ fontSize: 12.5 }}>{label}</span>
-            <ToggleSwitch on={privacyState[key]} onToggle={() => onPrivacyToggle(key)} />
-          </div>
-        ))}
-      </div>
-      <div className="sp-card profile-session-card">
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 12 }}>
-          <Icon.Shield />
-          <div className="sp-label" style={{ marginBottom: 0 }}>Session</div>
+      )}
+
+      {adminTab === "feedback" && (
+        <div className="admin-list-stack">
+          {adminData.feedback.length > 0 ? adminData.feedback.map(item => (
+            <div key={item.id} className="sp-card admin-list-card">
+              <div className="circle-card-head">
+                <div>
+                  <div className="sp-label">{item.category}</div>
+                  <div className="sp-h2">{item.subject}</div>
+                  <div className="sp-sub">{item.createdBy?.name || "Member"} · {formatRelativeTime(item.createdAt)}</div>
+                </div>
+                <span className={`circle-room-status ${item.status === "resolved" ? "open" : "paused"}`}>
+                  {item.status}
+                </span>
+              </div>
+              <div className="sp-sub" style={{ marginBottom: 12 }}>{item.message}</div>
+              <div className="sp-input-row">
+                {["open", "reviewing", "resolved"].map(status => (
+                  <button
+                    key={status}
+                    className={`sp-btn ${item.status === status ? "sp-btn-primary" : "sp-btn-ghost"}`}
+                    type="button"
+                    onClick={() => onUpdateFeedbackStatus(item.id, status)}
+                  >
+                    {status}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )) : (
+            <div className="circle-empty-note">No complaints or good feedback have been submitted yet.</div>
+          )}
         </div>
-        <div className="sp-sub" style={{ marginBottom: 16 }}>
-          Logging out will end this local anonymous session and take you back to the landing page.
-        </div>
-        <button className="sp-btn sp-btn-ghost profile-logout-btn" onClick={onLogout} type="button" disabled={loggingOut}>
-          {loggingOut ? "Logging out..." : "Log Out"}
-        </button>
-      </div>
+      )}
     </div>
   );
 }
 
 // ─── RIGHT PANEL ──────────────────────────────────────────────────────────────
 function RightPanel({
+  currentUserId,
   currentMood,
+  circleUnreadCount,
   entryMethod,
   isGuest,
   isSuperAdmin,
   joinedCircles,
+  liveCircleCount,
+  onOpenAdminView,
   onMoodChange,
   onOpenCircle,
   onRequireAccount,
+  openFeedbackCount,
   username,
 }) {
   if (isGuest) {
@@ -1253,7 +1773,13 @@ function RightPanel({
         </div>
       </div>
       <div className="side-section">
-        <div className="sp-label">Your Circles</div>
+        <div className="circle-card-head">
+          <div className="sp-label">Your Circles</div>
+          <div className="circle-card-statuses">
+            <NotificationBadge value={circleUnreadCount > 0 ? String(circleUnreadCount) : ""} tone="accent" />
+            <NotificationBadge value={liveCircleCount > 0 ? `${liveCircleCount} live` : ""} tone="success" />
+          </div>
+        </div>
         {joinedCircles.length > 0 ? joinedCircles.slice(0, 3).map(circle => (
           <button key={circle.id} className="circle-mini circle-mini-button" type="button" onClick={() => onOpenCircle(circle.id)}>
             <span className="circle-mini-icon">{circle.icon}</span>
@@ -1261,12 +1787,31 @@ function RightPanel({
               <div className="circle-mini-title">{circle.topic}</div>
               <div className="circle-mini-meta">{circle.members.length} members</div>
             </div>
+            <div className="circle-card-statuses">
+              <NotificationBadge value={getCircleUnreadCount(circle, currentUserId) > 0 ? String(getCircleUnreadCount(circle, currentUserId)) : ""} tone="accent" />
+              <NotificationBadge live={isCircleLive(circle)} tone="success" />
+            </div>
             <Icon.Forward />
           </button>
         )) : (
           <div className="circle-empty-note">Join a circle to get quick access to its live room, queue, and chat.</div>
         )}
       </div>
+      {isSuperAdmin && (
+        <div className="side-section">
+          <div className="circle-card-head">
+            <div className="sp-label">Admin Dock</div>
+            <NotificationBadge value={openFeedbackCount > 0 ? String(openFeedbackCount) : ""} tone="accent" />
+          </div>
+          <div className="circle-empty-note">
+            Circle creation, people management, and complaints review now live in the admin dashboard.
+          </div>
+          <button className="join-btn guest-upgrade-btn" type="button" onClick={onOpenAdminView}>
+            <Icon.Settings />
+            Open Admin
+          </button>
+        </div>
+      )}
       <div className="side-section">
         <div className="sp-label">Today&apos;s Mood</div>
         <div className="mood-grid mood-grid-expanded">
@@ -1290,14 +1835,6 @@ function RightPanel({
   );
 }
 
-// ─── NAV CONFIG ───────────────────────────────────────────────────────────────
-const NAV = [
-  { id: "home",    label: "Chats",   Ic: Icon.Chat    },
-  { id: "express", label: "Express", Ic: Icon.Express },
-  { id: "chat",    label: "AI Assist", Ic: Icon.Assistant },
-  { id: "circles", label: "Circles", Ic: Icon.Circles },
-];
-
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function SharePass() {
   const router = useRouter();
@@ -1312,8 +1849,11 @@ export default function SharePass() {
   const [sessionProfile, setSessionProfile] = useState(null);
   const [currentMood, setCurrentMood] = useState("hopeful");
   const [circles, setCircles] = useState([]);
+  const [circlesLoading, setCirclesLoading] = useState(false);
   const [activeCircleId, setActiveCircleId] = useState("");
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [adminData, setAdminData] = useState(DEFAULT_ADMIN_DATA);
+  const [adminLoading, setAdminLoading] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const lastNonChatViewRef = useRef("home");
@@ -1388,6 +1928,36 @@ export default function SharePass() {
     if (savedActiveCircleId && nextCircles.some(circle => circle.id === savedActiveCircleId)) {
       setActiveCircleId(savedActiveCircleId);
     }
+
+    let active = true;
+
+    const loadCircles = async () => {
+      setCirclesLoading(true);
+
+      try {
+        const response = await requestJson("/api/circles");
+
+        if (active && Array.isArray(response.circles) && response.circles.length > 0) {
+          setCircles(response.circles);
+
+          if (savedActiveCircleId && response.circles.some(circle => circle.id === savedActiveCircleId)) {
+            setActiveCircleId(savedActiveCircleId);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to load circles", error);
+      } finally {
+        if (active) {
+          setCirclesLoading(false);
+        }
+      }
+    };
+
+    void loadCircles();
+
+    return () => {
+      active = false;
+    };
   }, [sessionReady]);
 
   useEffect(() => {
@@ -1446,10 +2016,92 @@ export default function SharePass() {
   const isGuest = isGuestEntry(entryMethod);
   const currentUserId = sessionProfile ? createCurrentMemberId(sessionProfile) : "";
   const joinedCircles = circles.filter(circle => circle.members.some(member => member.id === currentUserId));
+  const circleUnreadCount = joinedCircles.reduce((sum, circle) => sum + getCircleUnreadCount(circle, currentUserId), 0);
+  const liveCircleCount = joinedCircles.filter(circle => isCircleLive(circle)).length;
+  const openFeedbackCount = adminData.feedback.filter(item => item.status !== "resolved").length;
+  const navItems = isSuperAdmin
+    ? [...BASE_NAV, { id: "admin", label: "Admin", Ic: Icon.Settings, desktopOnly: true }]
+    : BASE_NAV;
+
+  const loadAdminData = useCallback(async () => {
+    if (!isSuperAdmin || !sessionProfile?.email) {
+      setAdminData(DEFAULT_ADMIN_DATA);
+      return;
+    }
+
+    setAdminLoading(true);
+
+    try {
+      const response = await requestJson(
+        `/api/admin?viewerEmail=${encodeURIComponent(sessionProfile.email)}${isSuperAdmin ? "&allowClientAdminFallback=1" : ""}`,
+      );
+
+      setAdminData({
+        users: Array.isArray(response.users) ? response.users : [],
+        feedback: Array.isArray(response.feedback) ? response.feedback : [],
+        stats: response.stats || DEFAULT_ADMIN_DATA.stats,
+      });
+
+      if (Array.isArray(response.circles) && response.circles.length > 0) {
+        setCircles(response.circles);
+      }
+    } catch (error) {
+      console.error("Failed to load admin dashboard", error);
+    } finally {
+      setAdminLoading(false);
+    }
+  }, [isSuperAdmin, sessionProfile]);
+
+  useEffect(() => {
+    if (!sessionReady || isGuest || !sessionProfile?.email) return;
+
+    void requestJson("/api/users", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionProfile,
+        currentMood,
+        joinedCircleIds: joinedCircles.map(circle => circle.id),
+        isSuperAdmin,
+      }),
+    }).catch(error => {
+      console.error("Failed to sync user state", error);
+    });
+  }, [currentMood, isGuest, isSuperAdmin, joinedCircles, sessionProfile, sessionReady]);
+
+  useEffect(() => {
+    if (!sessionReady || !isSuperAdmin) {
+      setAdminData(DEFAULT_ADMIN_DATA);
+      return;
+    }
+
+    void loadAdminData();
+  }, [isSuperAdmin, loadAdminData, sessionReady]);
 
   const toggleTheme = () => setTheme(t => t === "dark" ? "light" : "dark");
   const togglePrivacy = key => setPrivacy(p => ({ ...p, [key]: !p[key] }));
   const toggleMobileIdentity = () => setMobileIdentityOpen(open => !open);
+
+  const persistCircleRequest = useCallback(async (method, body) => {
+    const response = await requestJson("/api/circles", {
+      method,
+      body: JSON.stringify({
+        ...body,
+        sessionProfile,
+        currentMood,
+        isSuperAdmin,
+      }),
+    });
+
+    if (Array.isArray(response.circles)) {
+      setCircles(response.circles);
+    }
+
+    if (isSuperAdmin) {
+      void loadAdminData();
+    }
+
+    return response;
+  }, [currentMood, isSuperAdmin, loadAdminData, sessionProfile]);
 
   const handleRequireAccount = useCallback(reason => {
     setMobileIdentityOpen(false);
@@ -1489,233 +2141,218 @@ export default function SharePass() {
     })));
   }, [currentUserId]);
 
-  const handleOpenCircle = useCallback(circleId => {
+  const handleOpenCircle = useCallback(async circleId => {
     setActiveCircleId(circleId);
     setView("circles");
     setMobileIdentityOpen(false);
-  }, []);
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "mark-read",
+        circleId,
+      });
+    } catch (error) {
+      console.error("Failed to mark circle as read", error);
+    }
+  }, [persistCircleRequest]);
 
   const handleBackToCircleDirectory = useCallback(() => {
     setActiveCircleId("");
   }, []);
 
-  const handleJoinCircle = useCallback(circleId => {
+  const handleJoinCircle = useCallback(async circleId => {
     if (!sessionProfile) return;
-
-    const moodMeta = getMoodMeta(currentMood);
-    const memberId = createCurrentMemberId(sessionProfile);
-    const memberName = sessionProfile.displayName || sessionProfile.username || username;
-
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId) return circle;
-      if (circle.members.some(member => member.id === memberId)) return circle;
-
-      const newMember = createCircleMember({
-        id: memberId,
-        name: memberName,
-        role: isSuperAdmin ? "moderator" : "member",
-        mood: currentMood,
-        color: moodMeta.color,
-        email: sessionProfile.email,
-      });
-
-      return {
-        ...circle,
-        members: [...circle.members, newMember],
-        chat: [
-          ...circle.chat,
-          createCircleMessage({
-            author: memberName,
-            text: isSuperAdmin
-              ? "I joined this room to help guide the floor and keep the space safe."
-              : "I joined the room and I am listening in for now.",
-          }),
-        ],
-      };
-    }));
 
     setActiveCircleId(circleId);
     setView("circles");
     setMobileIdentityOpen(false);
-  }, [currentMood, isSuperAdmin, sessionProfile, username]);
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "join",
+        circleId,
+      });
+    } catch (error) {
+      console.error("Failed to join circle", error);
+    }
+  }, [persistCircleRequest, sessionProfile]);
 
-  const handleToggleHand = useCallback(circleId => {
+  const handleToggleHand = useCallback(async circleId => {
     if (!sessionProfile) return;
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "toggle-hand",
+        circleId,
+      });
+    } catch (error) {
+      console.error("Failed to toggle hand", error);
+    }
+  }, [persistCircleRequest, sessionProfile]);
 
-    const memberId = createCurrentMemberId(sessionProfile);
-    const memberName = sessionProfile.displayName || sessionProfile.username || username;
-
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId) return circle;
-      if (!circle.members.some(member => member.id === memberId) || circle.speakers.includes(memberId)) return circle;
-
-      const isQueued = circle.requestQueue.includes(memberId);
-      const nextQueue = isQueued
-        ? circle.requestQueue.filter(queueMemberId => queueMemberId !== memberId)
-        : [...circle.requestQueue, memberId];
-
-      return {
-        ...circle,
-        requestQueue: nextQueue,
-        chat: [
-          ...circle.chat,
-          createCircleMessage({
-            author: "Room",
-            text: isQueued
-              ? `${memberName} lowered their hand for now.`
-              : `${memberName} raised a hand to speak when the floor opens.`,
-            type: "announcement",
-          }),
-        ],
-      };
-    }));
-  }, [sessionProfile, username]);
-
-  const handleInviteSpeaker = useCallback((circleId, memberId) => {
+  const handleInviteSpeaker = useCallback(async (circleId, memberId) => {
     if (!isSuperAdmin) return;
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "invite-speaker",
+        circleId,
+        memberId,
+      });
+    } catch (error) {
+      console.error("Failed to invite speaker", error);
+    }
+  }, [isSuperAdmin, persistCircleRequest]);
 
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId || circle.speakers.includes(memberId)) return circle;
+  const handleMoveToAudience = useCallback(async (circleId, memberId) => {
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "move-to-audience",
+        circleId,
+        memberId,
+      });
+    } catch (error) {
+      console.error("Failed to move member to audience", error);
+    }
+  }, [persistCircleRequest]);
 
-      const invitedMember = getCircleMember(circle, memberId);
-
-      if (!invitedMember) return circle;
-
-      return {
-        ...circle,
-        speakers: [...circle.speakers, memberId],
-        requestQueue: circle.requestQueue.filter(queueMemberId => queueMemberId !== memberId),
-        chat: [
-          ...circle.chat,
-          createCircleMessage({
-            author: "Moderator",
-            text: `${invitedMember.name} was invited to the floor.`,
-            type: "announcement",
-          }),
-        ],
-      };
-    }));
-  }, [isSuperAdmin]);
-
-  const handleMoveToAudience = useCallback((circleId, memberId) => {
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId || !circle.speakers.includes(memberId)) return circle;
-
-      const member = getCircleMember(circle, memberId);
-
-      return {
-        ...circle,
-        speakers: circle.speakers.filter(speakerId => speakerId !== memberId),
-        chat: [
-          ...circle.chat,
-          createCircleMessage({
-            author: "Room",
-            text: `${member?.name || "A speaker"} moved back to the audience.`,
-            type: "announcement",
-          }),
-        ],
-      };
-    }));
-  }, []);
-
-  const handleToggleRequests = useCallback(circleId => {
+  const handleToggleRequests = useCallback(async circleId => {
     if (!isSuperAdmin) return;
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "toggle-requests",
+        circleId,
+      });
+    } catch (error) {
+      console.error("Failed to toggle requests", error);
+    }
+  }, [isSuperAdmin, persistCircleRequest]);
 
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId) return circle;
-
-      const allowRequests = !circle.allowRequests;
-
-      return {
-        ...circle,
-        allowRequests,
-        chat: [
-          ...circle.chat,
-          createCircleMessage({
-            author: "Moderator",
-            text: allowRequests
-              ? "Raise hand requests are open again."
-              : "Raise hand requests are paused for the moment.",
-            type: "announcement",
-          }),
-        ],
-      };
-    }));
-  }, [isSuperAdmin]);
-
-  const handleSendCircleMessage = useCallback((circleId, text) => {
+  const handleSendCircleMessage = useCallback(async (circleId, text) => {
     if (!sessionProfile || !text.trim()) return;
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "send-message",
+        circleId,
+        text: text.trim(),
+      });
+    } catch (error) {
+      console.error("Failed to send circle message", error);
+    }
+  }, [persistCircleRequest, sessionProfile]);
 
-    const memberId = createCurrentMemberId(sessionProfile);
-    const memberName = sessionProfile.displayName || sessionProfile.username || username;
-
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId || !circle.members.some(member => member.id === memberId)) return circle;
-
-      return {
-        ...circle,
-        chat: [...circle.chat, createCircleMessage({ author: memberName, text: text.trim() })],
-      };
-    }));
-  }, [sessionProfile, username]);
-
-  const handlePostAnnouncement = useCallback((circleId, text) => {
+  const handlePostAnnouncement = useCallback(async (circleId, text) => {
     if (!isSuperAdmin || !sessionProfile || !text.trim()) return;
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "post-announcement",
+        circleId,
+        text: text.trim(),
+      });
+    } catch (error) {
+      console.error("Failed to post announcement", error);
+    }
+  }, [isSuperAdmin, persistCircleRequest, sessionProfile]);
 
-    const author = sessionProfile.displayName || sessionProfile.username || username;
-    const createdAt = new Date().toISOString();
-
-    setCircles(prevCircles => prevCircles.map(circle => {
-      if (circle.id !== circleId) return circle;
-
-      const announcement = {
-        id: `announcement-${Date.now()}`,
-        title: "Room update",
-        body: text.trim(),
-        createdAt,
-        author,
-      };
-
-      return {
-        ...circle,
-        announcements: [announcement, ...circle.announcements],
-        chat: [...circle.chat, createCircleMessage({ author, text: text.trim(), type: "announcement", createdAt })],
-      };
-    }));
-  }, [isSuperAdmin, sessionProfile, username]);
-
-  const handleCreateCircle = useCallback(circleDraft => {
+  const handleCreateCircle = useCallback(async circleDraft => {
     if (!isSuperAdmin || !sessionProfile) return;
 
-    const moodMeta = getMoodMeta(currentMood);
-    const authorName = sessionProfile.displayName || sessionProfile.username || username;
-    const adminMemberId = createCurrentMemberId(sessionProfile);
-    const nextCircle = createCircleFromDraft({
-      ...circleDraft,
-      createdBy: sessionProfile,
+    try {
+      const response = await persistCircleRequest("POST", circleDraft);
+      const createdCircle = Array.isArray(response.circles)
+        ? response.circles.find(circle => !circles.some(existingCircle => existingCircle.id === circle.id)) || response.circles[0]
+        : null;
+
+      if (createdCircle?.id) {
+        setActiveCircleId(createdCircle.id);
+      }
+
+      setView("circles");
+      setMobileIdentityOpen(false);
+    } catch (error) {
+      console.error("Failed to create circle", error);
+    }
+  }, [circles, isSuperAdmin, persistCircleRequest, sessionProfile]);
+
+  const handleDeleteCircle = useCallback(async circleId => {
+    if (!isSuperAdmin) return;
+
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "delete-circle",
+        circleId,
+      });
+
+      if (activeCircleId === circleId) {
+        setActiveCircleId("");
+      }
+    } catch (error) {
+      console.error("Failed to delete circle", error);
+    }
+  }, [activeCircleId, isSuperAdmin, persistCircleRequest]);
+
+  const handleRemoveCircleMember = useCallback(async (circleId, memberId) => {
+    if (!isSuperAdmin) return;
+
+    try {
+      await persistCircleRequest("PATCH", {
+        action: "remove-member",
+        circleId,
+        memberId,
+      });
+    } catch (error) {
+      console.error("Failed to remove member", error);
+    }
+  }, [isSuperAdmin, persistCircleRequest]);
+
+  const handleSubmitFeedback = useCallback(async feedbackDraft => {
+    await requestJson("/api/feedback", {
+      method: "POST",
+      body: JSON.stringify({
+        ...feedbackDraft,
+        sessionProfile,
+      }),
     });
 
-    nextCircle.members = [
-      createCircleMember({
-        id: adminMemberId,
-        name: authorName,
-        role: "moderator",
-        mood: currentMood,
-        color: moodMeta.color,
-        email: sessionProfile.email,
-      }),
-    ];
-    nextCircle.speakers = [adminMemberId];
+    if (isSuperAdmin) {
+      void loadAdminData();
+    }
+  }, [isSuperAdmin, loadAdminData, sessionProfile]);
 
-    setCircles(prevCircles => [nextCircle, ...prevCircles]);
-    setActiveCircleId(nextCircle.id);
-    setView("circles");
-    setMobileIdentityOpen(false);
-  }, [currentMood, isSuperAdmin, sessionProfile, username]);
+  const handleDeleteUser = useCallback(async targetEmail => {
+    if (!sessionProfile?.email || !isSuperAdmin) return;
+
+    await requestJson("/api/users", {
+      method: "DELETE",
+      body: JSON.stringify({
+        viewerEmail: sessionProfile.email,
+        targetEmail,
+        isSuperAdmin,
+      }),
+    });
+
+    await loadAdminData();
+  }, [isSuperAdmin, loadAdminData, sessionProfile]);
+
+  const handleUpdateFeedbackStatus = useCallback(async (feedbackId, status) => {
+    if (!sessionProfile?.email || !isSuperAdmin) return;
+
+    await requestJson("/api/feedback", {
+      method: "PATCH",
+      body: JSON.stringify({
+        feedbackId,
+        status,
+        viewerEmail: sessionProfile.email,
+        isSuperAdmin,
+      }),
+    });
+
+    await loadAdminData();
+  }, [isSuperAdmin, loadAdminData, sessionProfile]);
 
   const handleViewChange = useCallback((newView) => {
     if (isGuest && GATED_VIEWS.has(newView)) {
       handleRequireAccount(newView);
+      return;
+    }
+
+    if (newView === "admin" && !isSuperAdmin) {
       return;
     }
 
@@ -1729,7 +2366,7 @@ export default function SharePass() {
 
     setView(newView);
     setMobileIdentityOpen(false); // Close mobile identity panel when navigating
-  }, [handleRequireAccount, isGuest, view]);
+  }, [handleRequireAccount, isGuest, isSuperAdmin, view]);
 
   const handlePostPublished = useCallback(async postDraft => {
     const response = await requestJson("/api/posts", {
@@ -1795,30 +2432,38 @@ export default function SharePass() {
         <div className={`mobile-identity-overlay ${mobileIdentityOpen ? 'open' : ''}`} onClick={toggleMobileIdentity} />
         <aside className={`mobile-identity-panel ${mobileIdentityOpen ? 'open' : ''}`}>
           <RightPanel
+            circleUnreadCount={circleUnreadCount}
+            currentUserId={currentUserId}
             currentMood={currentMood}
             joinedCircles={joinedCircles}
             username={username}
             isGuest={isGuest}
             isSuperAdmin={isSuperAdmin}
             entryMethod={entryMethod}
+            liveCircleCount={liveCircleCount}
+            onOpenAdminView={() => handleViewChange("admin")}
             onMoodChange={handleMoodChange}
             onOpenCircle={handleOpenCircle}
             onRequireAccount={handleRequireAccount}
+            openFeedbackCount={openFeedbackCount}
           />
         </aside>
 
         {/* Sidebar */}
         <aside className="sp-sidebar">
           <div className="sp-logo"><Icon.Logo theme={theme} size={34} /></div>
-          {NAV.map(n => (
+          {navItems.map(n => (
             <button
               key={n.id}
-              className={`sp-nav-btn ${n.id === "chat" ? "chat-nav-btn" : ""} ${isGuest && GATED_VIEWS.has(n.id) ? "restricted" : ""} ${view === n.id ? "active" : ""}`}
+              className={`sp-nav-btn ${n.id === "chat" ? "chat-nav-btn" : ""} ${n.desktopOnly ? "desktop-admin-nav" : ""} ${isGuest && GATED_VIEWS.has(n.id) ? "restricted" : ""} ${view === n.id ? "active" : ""}`}
               onClick={() => handleViewChange(n.id)}
             >
               <n.Ic active={view === n.id} />
               <span className="sp-nav-label">{n.label}</span>
               {isGuest && GATED_VIEWS.has(n.id) && <span className="sp-nav-lock">+</span>}
+              {n.id === "circles" && circleUnreadCount > 0 ? <span className="sp-nav-lock nav-count-lock">{circleUnreadCount}</span> : null}
+              {n.id === "circles" && circleUnreadCount === 0 && liveCircleCount > 0 ? <span className="sp-nav-lock nav-live-lock">•</span> : null}
+              {n.id === "admin" && openFeedbackCount > 0 ? <span className="sp-nav-lock nav-count-lock">{openFeedbackCount}</span> : null}
               <span className="sp-nav-tooltip">{n.label}</span>
             </button>
           ))}
@@ -1866,16 +2511,19 @@ export default function SharePass() {
             <CirclesView
               activeCircleId={activeCircleId}
               circles={circles}
+              circlesLoading={circlesLoading}
               currentMood={currentMood}
               isGuest={isGuest}
               isSuperAdmin={isSuperAdmin}
               onBackToDirectory={handleBackToCircleDirectory}
               onCreateCircle={handleCreateCircle}
+              onDeleteCircle={handleDeleteCircle}
               onInviteSpeaker={handleInviteSpeaker}
               onJoinCircle={handleJoinCircle}
               onMoveToAudience={handleMoveToAudience}
               onOpenCircle={handleOpenCircle}
               onPostAnnouncement={handlePostAnnouncement}
+              onRemoveCircleMember={handleRemoveCircleMember}
               onRequireAccount={handleRequireAccount}
               onSendCircleMessage={handleSendCircleMessage}
               onToggleHand={handleToggleHand}
@@ -1885,6 +2533,7 @@ export default function SharePass() {
           )}
           {view === "profile" && (
             <ProfileView
+              currentUserId={currentUserId}
               currentMood={currentMood}
               isSuperAdmin={isSuperAdmin}
               joinedCircles={joinedCircles}
@@ -1892,9 +2541,23 @@ export default function SharePass() {
               privacyState={privacy}
               onMoodChange={handleMoodChange}
               onOpenCircle={handleOpenCircle}
+              onSubmitFeedback={handleSubmitFeedback}
               onPrivacyToggle={togglePrivacy}
               onLogout={handleLogout}
               loggingOut={loggingOut}
+            />
+          )}
+          {view === "admin" && (
+            <AdminView
+              adminData={adminData}
+              adminLoading={adminLoading}
+              circles={circles}
+              currentUserEmail={sessionProfile?.email || ""}
+              isSuperAdmin={isSuperAdmin}
+              onDeleteCircle={handleDeleteCircle}
+              onDeleteUser={handleDeleteUser}
+              onOpenCircle={handleOpenCircle}
+              onUpdateFeedbackStatus={handleUpdateFeedbackStatus}
             />
           )}
         </main>
@@ -1902,14 +2565,19 @@ export default function SharePass() {
         {/* Right panel */}
         <aside className="sp-right">
           <RightPanel
+            circleUnreadCount={circleUnreadCount}
+            currentUserId={currentUserId}
             currentMood={currentMood}
             entryMethod={entryMethod}
             isGuest={isGuest}
             isSuperAdmin={isSuperAdmin}
             joinedCircles={joinedCircles}
+            liveCircleCount={liveCircleCount}
+            onOpenAdminView={() => handleViewChange("admin")}
             onMoodChange={handleMoodChange}
             onOpenCircle={handleOpenCircle}
             onRequireAccount={handleRequireAccount}
+            openFeedbackCount={openFeedbackCount}
             username={username}
           />
         </aside>

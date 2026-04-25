@@ -2,6 +2,10 @@
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
+  "/app": "pages/app.js",
   "/": "pages/index.js",
-  "/app": "pages/app.js"
+  "/api/users": "pages/api/users.js",
+  "/api/posts": "pages/api/posts.js",
+  "/404": "pages/404.js",
+  "/api/circles": "pages/api/circles.js"
 }
