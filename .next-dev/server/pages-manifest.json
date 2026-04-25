@@ -2,9 +2,6 @@
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
-  "/": "pages/index.js",
-  "/app": "pages/app.js",
-  "/api/ai": "pages/api/ai.js",
-  "/404": "pages/404.js",
-  "/api/posts": "pages/api/posts.js"
+  "/api/posts": "pages/api/posts.js",
+  "/app": "pages/app.js"
 }

@@ -1,12 +1,13 @@
 import Image from "next/image";
 
-export default function BrandLogo({
-  theme = "dark",
-  size = 24,
-  alt = "SharePass logo",
-  className = "",
-}) {
-  const src = theme === "light" ? "/dark-theme-logo.png" : "/light-theme-logo.png";
+export default function BrandLogo(props) {
+  const {
+    theme = "dark",
+    size = 24,
+    alt = "SharePass logo",
+    className = "",
+  } = props;
+  const src = theme === "light" ? "/light-theme-logo.png" : "/dark-theme-logo.png";
 
   return (
     <Image
