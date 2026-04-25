@@ -1,7 +1,6 @@
 import { readJsonObjectBody } from "../../lib/api-route-utils";
 import { createCurrentMemberId, normalizeCircle, syncCircleVoiceSession } from "../../lib/sharepass-circles";
 import {
-  getAdminEmailList,
   isAdminEmail,
   deleteUserByEmail,
   readCircles,
@@ -25,14 +24,8 @@ function normalizeSessionProfile(sessionProfile = {}) {
   };
 }
 
-function hasAdminAccess(email, allowClientAdminFallback = false) {
-  const adminEmails = getAdminEmailList();
-
-  if (isAdminEmail(email)) {
-    return true;
-  }
-
-  return adminEmails.length === 0 && allowClientAdminFallback;
+function hasAdminAccess(email) {
+  return isAdminEmail(email);
 }
 
 function sendMethodNotAllowed(res) {
@@ -50,9 +43,7 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const viewerEmail = cleanString(req.query.viewerEmail).toLowerCase();
-      const allowClientAdminFallback = req.query.allowClientAdminFallback === "1";
-
-      if (!hasAdminAccess(viewerEmail, allowClientAdminFallback)) {
+      if (!hasAdminAccess(viewerEmail)) {
         return res.status(403).json({ error: "Only admins can view user records." });
       }
 
@@ -92,7 +83,7 @@ export default async function handler(req, res) {
         username: sessionProfile.username || sessionProfile.displayName || sessionProfile.email.split("@")[0],
         displayName: sessionProfile.displayName || sessionProfile.username || sessionProfile.email.split("@")[0],
         entryMethod: sessionProfile.entryMethod || "email",
-        role: hasAdminAccess(sessionProfile.email, body.isSuperAdmin === true) ? "super-admin" : "member",
+        role: hasAdminAccess(sessionProfile.email) ? "super-admin" : "member",
         currentMood: cleanString(body.currentMood) || "hopeful",
         joinedCircleIds: Array.isArray(body.joinedCircleIds) ? body.joinedCircleIds.filter(Boolean) : [],
         createdAt: sessionProfile.createdAt || new Date().toISOString(),
@@ -110,9 +101,7 @@ export default async function handler(req, res) {
 
     const viewerEmail = cleanString(body.viewerEmail).toLowerCase();
     const targetEmail = cleanString(body.targetEmail).toLowerCase();
-    const allowClientAdminFallback = body.isSuperAdmin === true;
-
-    if (!hasAdminAccess(viewerEmail, allowClientAdminFallback)) {
+    if (!hasAdminAccess(viewerEmail)) {
       return res.status(403).json({ error: "Only admins can delete users." });
     }
 

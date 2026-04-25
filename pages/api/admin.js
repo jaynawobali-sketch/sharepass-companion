@@ -1,5 +1,4 @@
 import {
-  getAdminEmailList,
   isAdminEmail,
   readCircles,
   readFeedback,
@@ -11,14 +10,8 @@ function cleanString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function hasAdminAccess(email, allowClientAdminFallback = false) {
-  const adminEmails = getAdminEmailList();
-
-  if (isAdminEmail(email)) {
-    return true;
-  }
-
-  return adminEmails.length === 0 && allowClientAdminFallback;
+function hasAdminAccess(email) {
+  return isAdminEmail(email);
 }
 
 export default async function handler(req, res) {
@@ -28,9 +21,7 @@ export default async function handler(req, res) {
   }
 
   const viewerEmail = cleanString(req.query.viewerEmail).toLowerCase();
-  const allowClientAdminFallback = req.query.allowClientAdminFallback === "1";
-
-  if (!hasAdminAccess(viewerEmail, allowClientAdminFallback)) {
+  if (!hasAdminAccess(viewerEmail)) {
     return res.status(403).json({ error: "Only admins can view dashboard data." });
   }
 

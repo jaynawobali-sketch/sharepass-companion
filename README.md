@@ -40,6 +40,21 @@ npm run lint
 npm run build
 ```
 
+## Docker Setup
+
+1. Copy `.env.example` to `.env.local` and set your admin email allowlist plus any Google OAuth values you want to use.
+2. Start the full app + MongoDB stack:
+
+```bash
+docker compose up --build
+```
+
+3. Open `http://localhost:3000`.
+
+Notes:
+- The compose stack starts MongoDB automatically, so circles, users, feedback, and posts use the shared database instead of local memory.
+- Admin access is email-gated. Set `SUPER_ADMIN_EMAILS` and keep `NEXT_PUBLIC_SUPER_ADMIN_EMAILS` aligned so the UI and server agree on who can see the admin dashboard.
+
 ## Environment Variables
 
 `AI_PROVIDER`
@@ -75,8 +90,11 @@ Optional override for the users collection name. Default: `users`.
 `MONGODB_COLLECTION_FEEDBACK`
 Optional override for the feedback collection name. Default: `feedback`.
 
+`SUPER_ADMIN_EMAILS`
+Server-side comma-separated admin email allowlist used to enforce admin dashboard and room-management access.
+
 `NEXT_PUBLIC_SUPER_ADMIN_EMAILS`
-Comma-separated admin email allowlist used for admin dashboard access.
+Client-visible admin email allowlist used to light up admin navigation for approved accounts. Keep this aligned with `SUPER_ADMIN_EMAILS`.
 
 `APP_URL`
 Base app URL used to build the Google OAuth callback on the server.
@@ -98,7 +116,7 @@ Client-visible Google OAuth ID used to show the real Google sign-in option in th
 - If Anthropic env vars are missing, SharePass switches to safe fallback responses instead of crashing.
 - If MongoDB is not configured, posts, circles, users, and feedback still work in demo mode but are stored only in server memory.
 - Real Google sign-in needs a Google OAuth web app with the callback URL set to `/auth/google/callback`.
-- Admin access is currently email-allowlist based. For production, pair this with a trusted server session once your auth rollout is finalized.
+- Admin access is now email-allowlist based on the server. For production, pair this with a trusted server session once your auth rollout is finalized.
 - This repo is ready for GitHub, but secrets should stay only in `.env.local`.
 
 ## What To Add Next

@@ -11,7 +11,6 @@ import {
   syncCircleVoiceSession,
 } from "../../lib/sharepass-circles";
 import {
-  getAdminEmailList,
   isAdminEmail,
   readCircles,
   replaceCircles,
@@ -38,14 +37,17 @@ function resolveActorId(sessionProfile) {
   return createCurrentMemberId(sessionProfile);
 }
 
-function hasAdminAccess(sessionProfile, allowClientAdminFallback = false) {
-  const adminEmails = getAdminEmailList();
+function hasAdminAccess(sessionProfile) {
+  return isAdminEmail(sessionProfile.email);
+}
 
-  if (isAdminEmail(sessionProfile.email)) {
+function hasRoomModerationAccess(circle, sessionProfile, actorId) {
+  if (hasAdminAccess(sessionProfile)) {
     return true;
   }
 
-  return adminEmails.length === 0 && allowClientAdminFallback;
+  const actorMember = getCircleMember(circle, actorId);
+  return actorMember?.role === "moderator";
 }
 
 function findCircleIndex(circles, circleId) {
@@ -94,13 +96,11 @@ export default async function handler(req, res) {
   const actorName = resolveActorName(sessionProfile);
   const actorId = resolveActorId(sessionProfile);
   const currentMood = cleanString(body.currentMood) || "hopeful";
-  const allowClientAdminFallback = body.isSuperAdmin === true;
-
   try {
     const circles = await readCircles(db);
 
     if (req.method === "POST") {
-      if (!hasAdminAccess(sessionProfile, allowClientAdminFallback)) {
+      if (!hasAdminAccess(sessionProfile)) {
         return res.status(403).json({ error: "Only admins can create circles." });
       }
 
@@ -130,10 +130,10 @@ export default async function handler(req, res) {
           email: sessionProfile.email,
         }),
       ];
-      nextCircle.speakers = [actorId];
+      nextCircle.speakers = [];
       nextCircle.unreadCounts = { [actorId]: 0 };
       nextCircle.voiceSession = {
-        active: true,
+        active: false,
         updatedAt: new Date().toISOString(),
       };
       nextCircle.lastActivityAt = new Date().toISOString();
@@ -156,6 +156,8 @@ export default async function handler(req, res) {
       "invite-speaker",
       "move-to-audience",
       "toggle-requests",
+      "toggle-voice-session",
+      "update-member-role",
       "send-message",
       "post-announcement",
       "remove-member",
@@ -194,7 +196,7 @@ export default async function handler(req, res) {
         const nextMember = createCircleMember({
           id: actorId,
           name: actorName,
-          role: hasAdminAccess(sessionProfile, allowClientAdminFallback) ? "moderator" : "member",
+          role: hasAdminAccess(sessionProfile) ? "moderator" : "member",
           mood: currentMood,
           email: sessionProfile.email,
         });
@@ -206,7 +208,8 @@ export default async function handler(req, res) {
             ...currentCircle.chat,
             createCircleMessage({
               author: actorName,
-              text: hasAdminAccess(sessionProfile, allowClientAdminFallback)
+              authorRole: nextMember.role,
+              text: hasAdminAccess(sessionProfile)
                 ? "I joined this room to help guide the floor and keep the space safe."
                 : "I joined the room and I am listening in for now.",
             }),
@@ -218,6 +221,10 @@ export default async function handler(req, res) {
     if (action === "toggle-hand") {
       if (!currentCircle.members.some(member => member.id === actorId) || currentCircle.speakers.includes(actorId)) {
         return res.status(400).json({ error: "Join the circle before raising your hand." });
+      }
+
+      if (!currentCircle.voiceSession?.active) {
+        return res.status(400).json({ error: "The moderator has not started the voice floor yet." });
       }
 
       const isQueued = currentCircle.requestQueue.includes(actorId);
@@ -236,14 +243,15 @@ export default async function handler(req, res) {
               ? `${actorName} lowered their hand for now.`
               : `${actorName} raised a hand to speak when the floor opens.`,
             type: "announcement",
+            authorRole: "system",
           }),
         ],
       }, actorId);
     }
 
     if (action === "invite-speaker") {
-      if (!hasAdminAccess(sessionProfile, allowClientAdminFallback)) {
-        return res.status(403).json({ error: "Only admins can invite speakers." });
+      if (!hasRoomModerationAccess(currentCircle, sessionProfile, actorId)) {
+        return res.status(403).json({ error: "Only moderators can invite speakers." });
       }
 
       const invitedMemberId = cleanString(body.memberId);
@@ -263,16 +271,17 @@ export default async function handler(req, res) {
           ...currentCircle.chat,
           createCircleMessage({
             author: "Moderator",
+            authorRole: "moderator",
             text: `${invitedMember.name} was invited to the floor.`,
             type: "announcement",
           }),
         ],
-      }), actorId);
+      }, { active: true }), actorId);
     }
 
     if (action === "move-to-audience") {
       const movingMemberId = cleanString(body.memberId) || actorId;
-      const canMove = hasAdminAccess(sessionProfile, allowClientAdminFallback) || movingMemberId === actorId;
+      const canMove = hasRoomModerationAccess(currentCircle, sessionProfile, actorId) || movingMemberId === actorId;
 
       if (!canMove) {
         return res.status(403).json({ error: "You cannot move that speaker." });
@@ -287,6 +296,7 @@ export default async function handler(req, res) {
           ...currentCircle.chat,
           createCircleMessage({
             author: "Room",
+            authorRole: "system",
             text: `${member?.name || "A speaker"} moved back to the audience.`,
             type: "announcement",
           }),
@@ -295,8 +305,8 @@ export default async function handler(req, res) {
     }
 
     if (action === "toggle-requests") {
-      if (!hasAdminAccess(sessionProfile, allowClientAdminFallback)) {
-        return res.status(403).json({ error: "Only admins can change request settings." });
+      if (!hasRoomModerationAccess(currentCircle, sessionProfile, actorId)) {
+        return res.status(403).json({ error: "Only moderators can change request settings." });
       }
 
       const allowRequests = !currentCircle.allowRequests;
@@ -308,6 +318,7 @@ export default async function handler(req, res) {
           ...currentCircle.chat,
           createCircleMessage({
             author: "Moderator",
+            authorRole: "moderator",
             text: allowRequests
               ? "Raise hand requests are open again."
               : "Raise hand requests are paused for the moment.",
@@ -315,6 +326,37 @@ export default async function handler(req, res) {
           }),
         ],
       }, actorId);
+    }
+
+    if (action === "toggle-voice-session") {
+      if (!hasRoomModerationAccess(currentCircle, sessionProfile, actorId)) {
+        return res.status(403).json({ error: "Only moderators can start or end the voice floor." });
+      }
+
+      const nextActive = !currentCircle.voiceSession?.active;
+      const actorMember = getCircleMember(currentCircle, actorId);
+      const nextSpeakers = nextActive
+        ? (actorMember && !currentCircle.speakers.includes(actorId)
+            ? [actorId, ...currentCircle.speakers]
+            : currentCircle.speakers)
+        : [];
+
+      nextCircle = bumpCircleUnreadCounts(syncCircleVoiceSession({
+        ...currentCircle,
+        speakers: nextSpeakers,
+        requestQueue: nextActive ? currentCircle.requestQueue : [],
+        chat: [
+          ...currentCircle.chat,
+          createCircleMessage({
+            author: actorName,
+            authorRole: actorMember?.role || (hasAdminAccess(sessionProfile) ? "moderator" : "system"),
+            text: nextActive
+              ? "The moderator started the live voice floor. Raise your hand if you want to speak."
+              : "The moderator ended the live voice floor for now. Chat remains open for support.",
+            type: "announcement",
+          }),
+        ],
+      }, { active: nextActive }), actorId);
     }
 
     if (action === "send-message") {
@@ -328,15 +370,24 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Join the circle before chatting." });
       }
 
+      const currentMember = getCircleMember(currentCircle, actorId);
+
       nextCircle = bumpCircleUnreadCounts({
         ...currentCircle,
-        chat: [...currentCircle.chat, createCircleMessage({ author: actorName, text })],
+        chat: [
+          ...currentCircle.chat,
+          createCircleMessage({
+            author: actorName,
+            authorRole: currentMember?.role || "member",
+            text,
+          }),
+        ],
       }, actorId);
     }
 
     if (action === "post-announcement") {
-      if (!hasAdminAccess(sessionProfile, allowClientAdminFallback)) {
-        return res.status(403).json({ error: "Only admins can post announcements." });
+      if (!hasRoomModerationAccess(currentCircle, sessionProfile, actorId)) {
+        return res.status(403).json({ error: "Only moderators can post announcements." });
       }
 
       const text = cleanString(body.text);
@@ -363,6 +414,7 @@ export default async function handler(req, res) {
           ...currentCircle.chat,
           createCircleMessage({
             author: actorName,
+            authorRole: "moderator",
             text,
             type: "announcement",
             createdAt,
@@ -371,9 +423,54 @@ export default async function handler(req, res) {
       }, actorId);
     }
 
+    if (action === "update-member-role") {
+      if (!hasAdminAccess(sessionProfile)) {
+        return res.status(403).json({ error: "Only admins can assign moderators." });
+      }
+
+      const targetMemberId = cleanString(body.memberId);
+      const nextRole = cleanString(body.role).toLowerCase();
+
+      if (!targetMemberId || !["member", "moderator"].includes(nextRole)) {
+        return res.status(400).json({ error: "Choose a member and a valid role." });
+      }
+
+      const targetMember = getCircleMember(currentCircle, targetMemberId);
+
+      if (!targetMember) {
+        return res.status(404).json({ error: "Member not found in this circle." });
+      }
+
+      const moderatorCount = currentCircle.members.filter(member => member.role === "moderator").length;
+
+      if (targetMember.role === "moderator" && nextRole === "member" && moderatorCount <= 1) {
+        return res.status(400).json({ error: "Keep at least one moderator in the circle." });
+      }
+
+      nextCircle = bumpCircleUnreadCounts({
+        ...currentCircle,
+        members: currentCircle.members.map(member => (
+          member.id === targetMemberId
+            ? { ...member, role: nextRole }
+            : member
+        )),
+        chat: [
+          ...currentCircle.chat,
+          createCircleMessage({
+            author: "Admin",
+            authorRole: "moderator",
+            text: nextRole === "moderator"
+              ? `${targetMember.name} is now a moderator for this circle.`
+              : `${targetMember.name} is now listening as a member again.`,
+            type: "announcement",
+          }),
+        ],
+      }, actorId);
+    }
+
     if (action === "remove-member") {
-      if (!hasAdminAccess(sessionProfile, allowClientAdminFallback)) {
-        return res.status(403).json({ error: "Only admins can remove members." });
+      if (!hasRoomModerationAccess(currentCircle, sessionProfile, actorId)) {
+        return res.status(403).json({ error: "Only moderators can remove members." });
       }
 
       const targetMemberId = cleanString(body.memberId);
@@ -383,6 +480,11 @@ export default async function handler(req, res) {
       }
 
       const targetMember = getCircleMember(currentCircle, targetMemberId);
+      const moderatorCount = currentCircle.members.filter(member => member.role === "moderator").length;
+
+      if (targetMember?.role === "moderator" && moderatorCount <= 1) {
+        return res.status(400).json({ error: "Keep at least one moderator in the circle." });
+      }
 
       nextCircle = bumpCircleUnreadCounts(syncCircleVoiceSession({
         ...currentCircle,
@@ -396,6 +498,7 @@ export default async function handler(req, res) {
           ...currentCircle.chat,
           createCircleMessage({
             author: "Moderator",
+            authorRole: "moderator",
             text: `${targetMember?.name || "A member"} was removed from this circle.`,
             type: "announcement",
           }),
@@ -404,7 +507,7 @@ export default async function handler(req, res) {
     }
 
     if (action === "delete-circle") {
-      if (!hasAdminAccess(sessionProfile, allowClientAdminFallback)) {
+      if (!hasAdminAccess(sessionProfile)) {
         return res.status(403).json({ error: "Only admins can delete circles." });
       }
 

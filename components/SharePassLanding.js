@@ -500,7 +500,7 @@ export default function SharePassLanding() {
         "Google Authorization",
         "Choose a Google account",
         hasRealGoogleOAuth
-          ? "Use Google's real account chooser for verified sign-in, or fall back to the local dev flow while your OAuth setup is still in progress."
+          ? "Use Google's real account chooser for verified sign-in and let SharePass create the local session after Google confirms the account."
           : "Select a remembered Google account or add another one, then we authorize it locally and move you into the app.",
       )}
 
@@ -528,7 +528,7 @@ export default function SharePassLanding() {
         </div>
       )}
 
-      {savedAccounts.google.length > 0 ? (
+      {!hasRealGoogleOAuth && savedAccounts.google.length > 0 ? (
         <div className="entry-provider-block">
           <div className="entry-provider-block-head">
             <h3>Remembered Google accounts</h3>
@@ -553,42 +553,44 @@ export default function SharePassLanding() {
             ))}
           </div>
         </div>
-      ) : (
+      ) : !hasRealGoogleOAuth ? (
         <div className="entry-empty-note">
           No Google account is remembered on this device yet. Add one below and it will show up here next time.
         </div>
+      ) : null}
+
+      {!hasRealGoogleOAuth && (
+        <form className="entry-provider-form" onSubmit={handleGoogleCustomAccount}>
+          <div className="entry-provider-block-head">
+            <h3>Use another Google account</h3>
+            <span>Add and authorize</span>
+          </div>
+
+          <label className="entry-form-field">
+            <span>Name</span>
+            <input
+              type="text"
+              placeholder="Your name"
+              value={googleDraft.displayName}
+              onChange={event => setGoogleDraft(currentDraft => ({ ...currentDraft, displayName: event.target.value }))}
+            />
+          </label>
+
+          <label className="entry-form-field">
+            <span>Google email</span>
+            <input
+              type="email"
+              placeholder="you@gmail.com"
+              value={googleDraft.email}
+              onChange={event => setGoogleDraft(currentDraft => ({ ...currentDraft, email: event.target.value }))}
+            />
+          </label>
+
+          <button className="entry-primary-btn entry-provider-submit" type="submit" disabled={isAuthorizing}>
+            {authorizingMethod === "google" ? "Authorizing Google..." : "Authorize Google"}
+          </button>
+        </form>
       )}
-
-      <form className="entry-provider-form" onSubmit={handleGoogleCustomAccount}>
-        <div className="entry-provider-block-head">
-          <h3>Use another Google account</h3>
-          <span>Add and authorize</span>
-        </div>
-
-        <label className="entry-form-field">
-          <span>Name</span>
-          <input
-            type="text"
-            placeholder="Your name"
-            value={googleDraft.displayName}
-            onChange={event => setGoogleDraft(currentDraft => ({ ...currentDraft, displayName: event.target.value }))}
-          />
-        </label>
-
-        <label className="entry-form-field">
-          <span>Google email</span>
-          <input
-            type="email"
-            placeholder="you@gmail.com"
-            value={googleDraft.email}
-            onChange={event => setGoogleDraft(currentDraft => ({ ...currentDraft, email: event.target.value }))}
-          />
-        </label>
-
-        <button className="entry-primary-btn entry-provider-submit" type="submit" disabled={isAuthorizing}>
-          {authorizingMethod === "google" ? "Authorizing Google..." : "Authorize Google"}
-        </button>
-      </form>
     </div>
   );
 

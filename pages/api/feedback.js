@@ -1,6 +1,5 @@
 import { readJsonObjectBody } from "../../lib/api-route-utils";
 import {
-  getAdminEmailList,
   isAdminEmail,
   readFeedback,
   resolveStore,
@@ -21,14 +20,8 @@ function normalizeSessionProfile(sessionProfile = {}) {
   };
 }
 
-function hasAdminAccess(email, allowClientAdminFallback = false) {
-  const adminEmails = getAdminEmailList();
-
-  if (isAdminEmail(email)) {
-    return true;
-  }
-
-  return adminEmails.length === 0 && allowClientAdminFallback;
+function hasAdminAccess(email) {
+  return isAdminEmail(email);
 }
 
 function sendMethodNotAllowed(res) {
@@ -46,9 +39,7 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       const viewerEmail = cleanString(req.query.viewerEmail).toLowerCase();
-      const allowClientAdminFallback = req.query.allowClientAdminFallback === "1";
-
-      if (!hasAdminAccess(viewerEmail, allowClientAdminFallback)) {
+      if (!hasAdminAccess(viewerEmail)) {
         return res.status(403).json({ error: "Only admins can view feedback." });
       }
 
@@ -111,9 +102,7 @@ export default async function handler(req, res) {
     const feedbackId = cleanString(body.feedbackId);
     const status = cleanString(body.status).toLowerCase();
     const viewerEmail = cleanString(body.viewerEmail).toLowerCase();
-    const allowClientAdminFallback = body.isSuperAdmin === true;
-
-    if (!hasAdminAccess(viewerEmail, allowClientAdminFallback)) {
+    if (!hasAdminAccess(viewerEmail)) {
       return res.status(403).json({ error: "Only admins can update feedback." });
     }
 

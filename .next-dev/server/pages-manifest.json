@@ -5,7 +5,5 @@
   "/app": "pages/app.js",
   "/": "pages/index.js",
   "/api/users": "pages/api/users.js",
-  "/api/posts": "pages/api/posts.js",
-  "/404": "pages/404.js",
   "/api/circles": "pages/api/circles.js"
 }
