@@ -60,6 +60,16 @@ const DEFAULT_ADMIN_DATA = {
     openFeedback: 0,
   },
 };
+const WEBRTC_CONFIG = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
+const VOICE_POLL_INTERVAL_MS = 2500;
+const VOICE_HEARTBEAT_INTERVAL_MS = 5000;
+const EMPTY_ITEMS = [];
+
+function createVoiceClientId(prefix = "voice") {
+  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
 
 function getCircleUnreadCount(circle, memberId) {
   return Math.max(0, Number(circle?.unreadCounts?.[memberId] || 0));
@@ -505,7 +515,7 @@ function AIChat({ onBack }) {
     const nextHeight = Math.min(textarea.scrollHeight, maxComposerHeight);
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY = textarea.scrollHeight > maxComposerHeight ? "auto" : "hidden";
-  }, [maxComposerHeight]);
+  }, []);
 
   useEffect(() => {
     resizeComposer();
@@ -836,6 +846,759 @@ function CircleMessageRow({ message }) {
   );
 }
 
+function CircleVoicePanel({
+  activeCircle,
+  canModerateRoom,
+  currentMember,
+  currentUserId,
+  onToggleVoiceSession,
+  sessionProfile,
+}) {
+  const [voiceRoom, setVoiceRoom] = useState({
+    active: Boolean(activeCircle.voiceSession?.active),
+    participants: [],
+    signals: [],
+    updatedAt: activeCircle.voiceSession?.updatedAt || "",
+  });
+  const [audioJoined, setAudioJoined] = useState(false);
+  const [audioBusy, setAudioBusy] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState("");
+  const [voiceError, setVoiceError] = useState("");
+  const [remoteStreams, setRemoteStreams] = useState({});
+  const localStreamRef = useRef(null);
+  const peerConnectionsRef = useRef({});
+  const pendingIceCandidatesRef = useRef({});
+  const processedSignalIdsRef = useRef(new Set());
+  const remoteAudioRefs = useRef({});
+  const activeCircleId = activeCircle.id;
+  const voiceParticipants = Array.isArray(voiceRoom.participants) ? voiceRoom.participants : EMPTY_ITEMS;
+  const connectedParticipants = voiceParticipants.length;
+  const connectedListeners = voiceParticipants.filter(participant => !participant.onFloor && !participant.isModerator);
+
+  const closePeerConnection = useCallback(remoteMemberId => {
+    const connection = peerConnectionsRef.current[remoteMemberId];
+
+    if (connection) {
+      connection.ontrack = null;
+      connection.onicecandidate = null;
+      connection.onconnectionstatechange = null;
+      connection.close();
+      delete peerConnectionsRef.current[remoteMemberId];
+    }
+
+    delete pendingIceCandidatesRef.current[remoteMemberId];
+    setRemoteStreams(currentStreams => {
+      if (!currentStreams[remoteMemberId]) {
+        return currentStreams;
+      }
+
+      const nextStreams = { ...currentStreams };
+      delete nextStreams[remoteMemberId];
+      return nextStreams;
+    });
+  }, []);
+
+  const detachAudioRoom = useCallback(({ status = "", error = "", clearParticipants = false } = {}) => {
+    Object.keys(peerConnectionsRef.current).forEach(remoteMemberId => {
+      const connection = peerConnectionsRef.current[remoteMemberId];
+
+      if (connection) {
+        connection.ontrack = null;
+        connection.onicecandidate = null;
+        connection.onconnectionstatechange = null;
+        connection.close();
+      }
+    });
+
+    peerConnectionsRef.current = {};
+    pendingIceCandidatesRef.current = {};
+    processedSignalIdsRef.current = new Set();
+    Object.values(remoteAudioRefs.current).forEach(node => {
+      if (node) {
+        node.srcObject = null;
+      }
+    });
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+
+    setRemoteStreams({});
+    setAudioJoined(false);
+    setAudioBusy(false);
+    setMicMuted(false);
+    setVoiceRoom(currentRoom => ({
+      ...currentRoom,
+      active: Boolean(activeCircle.voiceSession?.active),
+      signals: [],
+      participants: clearParticipants ? [] : currentRoom.participants,
+    }));
+    setVoiceStatus(status);
+    setVoiceError(error);
+  }, [activeCircle.voiceSession?.active]);
+
+  const postVoiceAction = useCallback(async (action, extra = {}) => {
+    const response = await requestJson("/api/circle-voice", {
+      method: "POST",
+      body: JSON.stringify({
+        action,
+        circleId: activeCircleId,
+        sessionProfile,
+        ...extra,
+      }),
+    });
+
+    if (response.room) {
+      setVoiceRoom(response.room);
+    }
+
+    return response.room || null;
+  }, [activeCircleId, sessionProfile]);
+
+  const leaveAudioRoom = useCallback(async ({ notifyServer = true, status = "You left the audio room." } = {}) => {
+    if (notifyServer) {
+      try {
+        await postVoiceAction("leave");
+      } catch (error) {
+        console.error("Failed to leave audio room", error);
+      }
+    }
+
+    detachAudioRoom({ status });
+  }, [detachAudioRoom, postVoiceAction]);
+
+  const fetchVoiceRoom = useCallback(async () => {
+    if (!activeCircleId || !sessionProfile?.email) {
+      return null;
+    }
+
+    const query = new URLSearchParams({
+      circleId: activeCircleId,
+      email: sessionProfile.email || "",
+      username: sessionProfile.username || "",
+      displayName: sessionProfile.displayName || "",
+    });
+    const response = await requestJson(`/api/circle-voice?${query.toString()}`);
+
+    if (response.room) {
+      setVoiceRoom(response.room);
+
+      if (!response.room.active && (audioJoined || localStreamRef.current)) {
+        detachAudioRoom({ status: "The moderator ended the live audio room.", clearParticipants: true });
+      }
+    }
+
+    return response.room || null;
+  }, [activeCircleId, audioJoined, detachAudioRoom, sessionProfile]);
+
+  const sendLeaveBeacon = useCallback(() => {
+    if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") {
+      return;
+    }
+
+    try {
+      const payload = JSON.stringify({
+        action: "leave",
+        circleId: activeCircleId,
+        sessionProfile,
+      });
+
+      navigator.sendBeacon("/api/circle-voice", new Blob([payload], { type: "application/json" }));
+    } catch (error) {
+      console.error("Failed to send voice leave beacon", error);
+    }
+  }, [activeCircleId, sessionProfile]);
+
+  const sendSignal = useCallback(async (toMemberId, type, payload) => {
+    await postVoiceAction("signal", {
+      id: createVoiceClientId("signal"),
+      toMemberId,
+      type,
+      payload,
+      muted: micMuted,
+    });
+  }, [micMuted, postVoiceAction]);
+
+  const flushPendingIceCandidates = useCallback(async remoteMemberId => {
+    const connection = peerConnectionsRef.current[remoteMemberId];
+
+    if (!connection?.remoteDescription) {
+      return;
+    }
+
+    const pendingCandidates = pendingIceCandidatesRef.current[remoteMemberId] || [];
+
+    while (pendingCandidates.length > 0) {
+      const nextCandidate = pendingCandidates.shift();
+
+      try {
+        await connection.addIceCandidate(new RTCIceCandidate(nextCandidate));
+      } catch (error) {
+        console.error("Failed to apply queued ICE candidate", error);
+      }
+    }
+  }, []);
+
+  const ensurePeerConnection = useCallback(async (remoteMemberId, initiateOffer = false) => {
+    if (!remoteMemberId || remoteMemberId === currentUserId) {
+      return null;
+    }
+
+    if (peerConnectionsRef.current[remoteMemberId]) {
+      return peerConnectionsRef.current[remoteMemberId];
+    }
+
+    if (typeof window === "undefined" || typeof window.RTCPeerConnection === "undefined") {
+      throw new Error("This browser cannot open the live audio room.");
+    }
+
+    const connection = new RTCPeerConnection(WEBRTC_CONFIG);
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        connection.addTrack(track, localStreamRef.current);
+      });
+    }
+
+    connection.ontrack = event => {
+      const [remoteStream] = event.streams;
+
+      if (!remoteStream) {
+        return;
+      }
+
+      setRemoteStreams(currentStreams => (
+        currentStreams[remoteMemberId] === remoteStream
+          ? currentStreams
+          : { ...currentStreams, [remoteMemberId]: remoteStream }
+      ));
+    };
+
+    connection.onicecandidate = event => {
+      if (!event.candidate) {
+        return;
+      }
+
+      const candidatePayload = typeof event.candidate.toJSON === "function"
+        ? event.candidate.toJSON()
+        : event.candidate;
+
+      void sendSignal(remoteMemberId, "ice", candidatePayload).catch(error => {
+        console.error("Failed to send ICE candidate", error);
+      });
+    };
+
+    connection.onconnectionstatechange = () => {
+      if (["failed", "closed"].includes(connection.connectionState)) {
+        closePeerConnection(remoteMemberId);
+        return;
+      }
+
+      if (connection.connectionState === "disconnected") {
+        window.setTimeout(() => {
+          const currentConnection = peerConnectionsRef.current[remoteMemberId];
+
+          if (currentConnection?.connectionState === "disconnected") {
+            closePeerConnection(remoteMemberId);
+          }
+        }, 2200);
+      }
+    };
+
+    pendingIceCandidatesRef.current[remoteMemberId] = pendingIceCandidatesRef.current[remoteMemberId] || [];
+    peerConnectionsRef.current[remoteMemberId] = connection;
+
+    if (initiateOffer) {
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      const offerPayload = typeof connection.localDescription?.toJSON === "function"
+        ? connection.localDescription.toJSON()
+        : connection.localDescription;
+
+      if (offerPayload) {
+        await sendSignal(remoteMemberId, "offer", offerPayload);
+      }
+    }
+
+    return connection;
+  }, [closePeerConnection, currentUserId, sendSignal]);
+
+  const handleJoinAudio = useCallback(async () => {
+    if (!currentMember) {
+      setVoiceError("Join the circle first so your audio room presence is tied to your room identity.");
+      return;
+    }
+
+    if (!activeCircle.voiceSession?.active) {
+      setVoiceError("Wait for a moderator to start the live voice floor before joining audio.");
+      return;
+    }
+
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setVoiceError("This browser cannot start a live microphone room.");
+      return;
+    }
+
+    setAudioBusy(true);
+    setVoiceError("");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      const [audioTrack] = stream.getAudioTracks();
+
+      if (audioTrack) {
+        audioTrack.enabled = !micMuted;
+      }
+
+      localStreamRef.current = stream;
+      await postVoiceAction("join", { muted: micMuted });
+      setAudioJoined(true);
+      setVoiceStatus("You are connected to the live audio room.");
+      await fetchVoiceRoom();
+    } catch (error) {
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+        localStreamRef.current = null;
+      }
+
+      const message = String(error?.message || "");
+      setVoiceError(
+        /permission|denied|blocked/i.test(message)
+          ? "Microphone access was blocked. Allow mic permission and try again."
+          : "The live audio room could not start. Please check your microphone and try again.",
+      );
+    } finally {
+      setAudioBusy(false);
+    }
+  }, [activeCircle.voiceSession?.active, currentMember, fetchVoiceRoom, micMuted, postVoiceAction]);
+
+  const handleToggleMute = useCallback(async () => {
+    if (!audioJoined || !localStreamRef.current) {
+      return;
+    }
+
+    const nextMuted = !micMuted;
+
+    localStreamRef.current.getAudioTracks().forEach(track => {
+      track.enabled = !nextMuted;
+    });
+    setMicMuted(nextMuted);
+    setVoiceError("");
+
+    try {
+      await postVoiceAction("set-muted", { muted: nextMuted });
+      setVoiceStatus(nextMuted ? "Your microphone is muted." : "Your microphone is live.");
+    } catch (error) {
+      localStreamRef.current.getAudioTracks().forEach(track => {
+        track.enabled = !micMuted;
+      });
+      setMicMuted(micMuted);
+      setVoiceError(error.message || "The microphone state could not be updated right now.");
+    }
+  }, [audioJoined, micMuted, postVoiceAction]);
+
+  const bindRemoteAudioRef = useCallback((memberId, node) => {
+    if (node) {
+      remoteAudioRefs.current[memberId] = node;
+      return;
+    }
+
+    delete remoteAudioRefs.current[memberId];
+  }, []);
+
+  useEffect(() => {
+    Object.entries(remoteAudioRefs.current).forEach(([memberId, node]) => {
+      if (!node) {
+        return;
+      }
+
+      const remoteStream = remoteStreams[memberId];
+
+      if (remoteStream) {
+        if (node.srcObject !== remoteStream) {
+          node.srcObject = remoteStream;
+        }
+      } else if (node.srcObject) {
+        node.srcObject = null;
+      }
+    });
+  }, [remoteStreams]);
+
+  useEffect(() => {
+    if (!activeCircle.voiceSession?.active || !sessionProfile?.email || !currentMember) {
+      return undefined;
+    }
+
+    let active = true;
+
+    const syncVoiceRoom = async () => {
+      try {
+        const room = await fetchVoiceRoom();
+
+        if (!active || !room) {
+          return;
+        }
+
+        if (!room.active && (audioJoined || localStreamRef.current)) {
+          detachAudioRoom({ status: "The moderator ended the live audio room.", clearParticipants: true });
+        }
+      } catch (error) {
+        if (active) {
+          console.error("Failed to sync voice room", error);
+        }
+      }
+    };
+
+    void syncVoiceRoom();
+
+    const intervalId = window.setInterval(() => {
+      void syncVoiceRoom();
+    }, VOICE_POLL_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [activeCircle.voiceSession?.active, audioJoined, currentMember, detachAudioRoom, fetchVoiceRoom, sessionProfile]);
+
+  useEffect(() => {
+    if (!audioJoined || !activeCircle.voiceSession?.active) {
+      return undefined;
+    }
+
+    const heartbeat = () => {
+      void postVoiceAction("heartbeat", { muted: micMuted }).catch(error => {
+        console.error("Voice heartbeat failed", error);
+      });
+    };
+
+    heartbeat();
+
+    const intervalId = window.setInterval(heartbeat, VOICE_HEARTBEAT_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeCircle.voiceSession?.active, audioJoined, micMuted, postVoiceAction]);
+
+  useEffect(() => {
+    if (!audioJoined || !activeCircle.voiceSession?.active) {
+      return;
+    }
+
+    const remoteMemberIds = voiceParticipants
+      .map(participant => participant.memberId)
+      .filter(memberId => memberId && memberId !== currentUserId);
+
+    remoteMemberIds.forEach(remoteMemberId => {
+      if (!peerConnectionsRef.current[remoteMemberId] && currentUserId.localeCompare(remoteMemberId) < 0) {
+        void ensurePeerConnection(remoteMemberId, true).catch(error => {
+          console.error("Failed to open voice connection", error);
+          setVoiceError("A participant connection could not be opened. The room will keep retrying.");
+        });
+      }
+    });
+
+    Object.keys(peerConnectionsRef.current).forEach(remoteMemberId => {
+      if (!remoteMemberIds.includes(remoteMemberId)) {
+        closePeerConnection(remoteMemberId);
+      }
+    });
+  }, [activeCircle.voiceSession?.active, audioJoined, closePeerConnection, currentUserId, ensurePeerConnection, voiceParticipants]);
+
+  useEffect(() => {
+    if (!audioJoined || !Array.isArray(voiceRoom.signals) || voiceRoom.signals.length === 0) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const processSignals = async () => {
+      const acknowledgedSignals = [];
+
+      for (const signal of voiceRoom.signals) {
+        if (cancelled || processedSignalIdsRef.current.has(signal.id)) {
+          continue;
+        }
+
+        processedSignalIdsRef.current.add(signal.id);
+
+        try {
+          if (signal.fromMemberId === currentUserId) {
+            acknowledgedSignals.push(signal.id);
+            continue;
+          }
+
+          if (signal.type === "offer") {
+            const connection = await ensurePeerConnection(signal.fromMemberId, false);
+
+            if (!connection) {
+              continue;
+            }
+
+            await connection.setRemoteDescription(new RTCSessionDescription(signal.payload));
+            await flushPendingIceCandidates(signal.fromMemberId);
+            const answer = await connection.createAnswer();
+            await connection.setLocalDescription(answer);
+            const answerPayload = typeof connection.localDescription?.toJSON === "function"
+              ? connection.localDescription.toJSON()
+              : connection.localDescription;
+
+            if (answerPayload) {
+              await sendSignal(signal.fromMemberId, "answer", answerPayload);
+            }
+          }
+
+          if (signal.type === "answer") {
+            const connection = peerConnectionsRef.current[signal.fromMemberId] || await ensurePeerConnection(signal.fromMemberId, false);
+
+            if (!connection) {
+              continue;
+            }
+
+            await connection.setRemoteDescription(new RTCSessionDescription(signal.payload));
+            await flushPendingIceCandidates(signal.fromMemberId);
+          }
+
+          if (signal.type === "ice") {
+            const connection = peerConnectionsRef.current[signal.fromMemberId] || await ensurePeerConnection(signal.fromMemberId, false);
+
+            if (!connection) {
+              continue;
+            }
+
+            if (connection.remoteDescription) {
+              await connection.addIceCandidate(new RTCIceCandidate(signal.payload));
+            } else {
+              pendingIceCandidatesRef.current[signal.fromMemberId] = [
+                ...(pendingIceCandidatesRef.current[signal.fromMemberId] || []),
+                signal.payload,
+              ];
+            }
+          }
+
+          acknowledgedSignals.push(signal.id);
+        } catch (error) {
+          console.error("Failed to process voice signal", error);
+        }
+      }
+
+      if (acknowledgedSignals.length > 0) {
+        try {
+          await postVoiceAction("ack-signals", { signalIds: acknowledgedSignals });
+        } catch (error) {
+          console.error("Failed to acknowledge voice signals", error);
+        }
+      }
+    };
+
+    void processSignals();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [audioJoined, currentUserId, ensurePeerConnection, flushPendingIceCandidates, postVoiceAction, sendSignal, voiceRoom.signals]);
+
+  useEffect(() => {
+    if (currentMember || (!audioJoined && !localStreamRef.current)) {
+      return;
+    }
+
+    detachAudioRoom({ status: "You are no longer in this circle, so the audio room was closed." });
+  }, [audioJoined, currentMember, detachAudioRoom]);
+
+  useEffect(() => {
+    if (activeCircle.voiceSession?.active || (!audioJoined && !localStreamRef.current)) {
+      return;
+    }
+
+    detachAudioRoom({ status: "The moderator ended the live audio room.", clearParticipants: true });
+  }, [activeCircle.voiceSession?.active, audioJoined, detachAudioRoom]);
+
+  useEffect(() => {
+    if (!audioJoined) {
+      return undefined;
+    }
+
+    const handlePageHide = () => {
+      sendLeaveBeacon();
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, [audioJoined, sendLeaveBeacon]);
+
+  useEffect(() => () => {
+    if (audioJoined || localStreamRef.current) {
+      void requestJson("/api/circle-voice", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "leave",
+          circleId: activeCircleId,
+          sessionProfile,
+        }),
+      }).catch(() => null);
+    }
+
+    Object.values(peerConnectionsRef.current).forEach(connection => {
+      connection?.close();
+    });
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+  }, [activeCircleId, audioJoined, sessionProfile]);
+
+  return (
+    <div className="sp-card circle-voice-card">
+      <div className="circle-card-head">
+        <div>
+          <div className="sp-label">Live Audio Room</div>
+          <div className="sp-h2">Real-time voice inside this circle</div>
+          <div className="sp-sub">
+            When the voice floor is live, members can join the audio room, hear each other in real time, and keep the conversation audio-only like a lightweight meeting room.
+          </div>
+        </div>
+        <div className="circle-card-statuses">
+          <NotificationBadge value={connectedParticipants > 0 ? `${connectedParticipants} connected` : ""} tone="accent" />
+          <span className={`circle-room-status ${activeCircle.voiceSession?.active ? "open" : "paused"}`}>
+            {activeCircle.voiceSession?.active ? "Audio Open" : "Audio Locked"}
+          </span>
+        </div>
+      </div>
+
+      <div className="circle-voice-grid">
+        <div className="circle-voice-main">
+          <div className="circle-voice-note">
+            <span className="circle-voice-note-icon"><Icon.Wave /></span>
+            <div>
+              <strong>
+                {audioJoined
+                  ? (micMuted ? "You are in the room with your mic muted." : "You are live in the room.")
+                  : activeCircle.voiceSession?.active
+                    ? "The audio room is open."
+                    : "The audio room opens when a moderator starts the voice floor."}
+              </strong>
+              <p>
+                {currentMember
+                  ? "Use mute whenever you need a quieter moment. The room still follows the circle's turn-taking culture, even while everyone can hear the live call."
+                  : "Join this circle first, then the audio room can recognize you and connect you to the live call."}
+              </p>
+            </div>
+          </div>
+
+          <div className="circle-voice-controls">
+            {!activeCircle.voiceSession?.active && canModerateRoom && (
+              <button className="sp-btn sp-btn-primary" type="button" onClick={() => onToggleVoiceSession(activeCircle.id)}>
+                <Icon.Mic active />
+                Start Audio Room
+              </button>
+            )}
+
+            {activeCircle.voiceSession?.active && !audioJoined && (
+              <button
+                className="sp-btn sp-btn-primary"
+                type="button"
+                disabled={audioBusy || !currentMember}
+                onClick={handleJoinAudio}
+              >
+                <Icon.Mic active />
+                {audioBusy ? "Joining Audio..." : "Join Audio Room"}
+              </button>
+            )}
+
+            {audioJoined && (
+              <>
+                <button className={`sp-btn ${micMuted ? "sp-btn-ghost" : "sp-btn-primary"}`} type="button" onClick={handleToggleMute}>
+                  <Icon.Mic active={!micMuted} />
+                  {micMuted ? "Unmute Mic" : "Mute Mic"}
+                </button>
+                <button className="sp-btn sp-btn-ghost" type="button" onClick={() => void leaveAudioRoom()}>
+                  <Icon.Close />
+                  Leave Audio
+                </button>
+              </>
+            )}
+
+            {activeCircle.voiceSession?.active && canModerateRoom && (
+              <button className="sp-btn sp-btn-ghost" type="button" onClick={() => onToggleVoiceSession(activeCircle.id)}>
+                <Icon.Wave />
+                End Audio Room
+              </button>
+            )}
+          </div>
+
+          {voiceStatus ? <div className="circle-voice-feedback">{voiceStatus}</div> : null}
+          {voiceError ? <div className="circle-voice-feedback error">{voiceError}</div> : null}
+        </div>
+
+        <div className="circle-voice-roster">
+          <div className="sp-label">Connected right now</div>
+          {voiceParticipants.length > 0 ? voiceParticipants.map(participant => {
+            const isCurrentParticipant = participant.memberId === currentUserId;
+            const member = getCircleMember(activeCircle, participant.memberId);
+            const mood = member ? getMoodMeta(member.mood) : null;
+            const avatarTone = member?.color || "var(--accent2)";
+
+            return (
+              <div key={participant.memberId} className={`circle-voice-member ${participant.muted ? "muted" : ""}`}>
+                <div className="circle-voice-member-main">
+                  <span className="circle-voice-avatar" style={{ background: avatarTone }}>
+                    {participant.name.charAt(0).toUpperCase()}
+                  </span>
+                  <div className="circle-voice-member-copy">
+                    <strong>{participant.name}</strong>
+                    <span>
+                      {participant.isModerator
+                        ? "Moderator"
+                        : participant.onFloor
+                          ? "On the floor"
+                          : "In the room"}
+                      {mood ? ` · ${mood.icon} ${mood.label}` : ""}
+                    </span>
+                  </div>
+                </div>
+                <div className="circle-voice-member-status">
+                  <span className={`circle-voice-chip ${participant.muted ? "muted" : "live"}`}>
+                    {participant.muted ? "Muted" : "Mic On"}
+                  </span>
+                  {isCurrentParticipant ? <span className="circle-voice-chip you">You</span> : null}
+                </div>
+              </div>
+            );
+          }) : (
+            <div className="circle-empty-note">
+              No one is connected to audio yet. {connectedListeners.length === 0 ? "When members join, they will show up here instantly." : ""}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {Object.entries(remoteStreams).map(([memberId, stream]) => (
+        <audio
+          key={memberId}
+          autoPlay
+          playsInline
+          ref={node => bindRemoteAudioRef(memberId, node)}
+          data-stream-id={stream.id}
+        />
+      ))}
+    </div>
+  );
+}
+
 function CirclesView({
   circles,
   activeCircleId,
@@ -860,6 +1623,7 @@ function CirclesView({
   onToggleRequests,
   onToggleVoiceSession,
   onInviteSpeaker,
+  onMarkCircleRead,
   sessionProfile,
 }) {
   const [chatDraft, setChatDraft] = useState("");
@@ -871,6 +1635,23 @@ function CirclesView({
     icon: "🫶",
   });
   const [roomTab, setRoomTab] = useState("overview");
+  const circleChatPreviewRef = useRef(null);
+  const circleChatFeedRef = useRef(null);
+  const circleChatComposerRef = useRef(null);
+  const maxCircleComposerHeight = 160;
+
+  const resizeCircleComposer = useCallback(() => {
+    const textarea = circleChatComposerRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "0px";
+    const nextHeight = Math.min(textarea.scrollHeight, maxCircleComposerHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxCircleComposerHeight ? "auto" : "hidden";
+  }, []);
 
   useEffect(() => {
     setChatDraft("");
@@ -883,6 +1664,57 @@ function CirclesView({
   const joinedCircles = circles.filter(circle => circle.members.some(member => member.id === currentUserId));
   const totalUnread = joinedCircles.reduce((sum, circle) => sum + getCircleUnreadCount(circle, currentUserId), 0);
   const liveJoinedCount = joinedCircles.filter(circle => isCircleLive(circle)).length;
+
+  useEffect(() => {
+    resizeCircleComposer();
+  }, [activeCircleId, chatDraft, resizeCircleComposer, roomTab]);
+
+  useEffect(() => {
+    if (!activeCircle) {
+      return;
+    }
+
+    const feedNode = roomTab === "chat" ? circleChatFeedRef.current : circleChatPreviewRef.current;
+
+    if (!feedNode) {
+      return;
+    }
+
+    feedNode.scrollTo({
+      top: feedNode.scrollHeight,
+      behavior: roomTab === "chat" ? "smooth" : "auto",
+    });
+  }, [activeCircle, roomTab]);
+
+  useEffect(() => {
+    if (!activeCircle || !onMarkCircleRead) {
+      return undefined;
+    }
+
+    const currentMember = getCircleMember(activeCircle, currentUserId);
+    const unreadCount = getCircleUnreadCount(activeCircle, currentUserId);
+
+    if (!currentMember || unreadCount === 0) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void onMarkCircleRead(activeCircle.id);
+    }, 200);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeCircle, currentUserId, onMarkCircleRead]);
+
+  const submitCircleMessage = useCallback(() => {
+    if (!activeCircle?.id || !chatDraft.trim()) {
+      return;
+    }
+
+    void onSendCircleMessage(activeCircle.id, chatDraft);
+    setChatDraft("");
+  }, [activeCircle?.id, chatDraft, onSendCircleMessage]);
 
   const renderCircleList = (items, options = {}) => {
     if (items.length === 0) {
@@ -1030,6 +1862,16 @@ function CirclesView({
 
         <ViewTabs items={roomTabs} activeId={roomTab} onChange={setRoomTab} />
 
+        <CircleVoicePanel
+          key={`${activeCircle.id}-${currentUserId}`}
+          activeCircle={activeCircle}
+          canModerateRoom={canModerateRoom}
+          currentMember={currentMember}
+          currentUserId={currentUserId}
+          onToggleVoiceSession={onToggleVoiceSession}
+          sessionProfile={sessionProfile}
+        />
+
         {roomTab === "overview" && (
           <div className="circle-room-layout">
             <div className="circle-room-sidebar">
@@ -1135,7 +1977,7 @@ function CirclesView({
                     Full Chat
                   </button>
                 </div>
-                <div className="circle-chat-feed circle-chat-feed-preview">
+                <div ref={circleChatPreviewRef} className="circle-chat-feed circle-chat-feed-preview">
                   {activeCircle.chat.slice(-4).map(message => (
                     <CircleMessageRow key={message.id} message={message} />
                   ))}
@@ -1242,7 +2084,7 @@ function CirclesView({
                 <span className="circle-chat-hint">Names, live-room status, and fresh messages stay visible so the conversation feels grounded and easy to follow.</span>
               </div>
 
-              <div className="circle-chat-feed circle-chat-feed-expanded">
+              <div ref={circleChatFeedRef} className="circle-chat-feed circle-chat-feed-expanded">
                 {activeCircle.chat.map(message => (
                   <CircleMessageRow key={message.id} message={message} />
                 ))}
@@ -1251,20 +2093,24 @@ function CirclesView({
               {currentMember ? (
                 <div className="circle-chat-composer">
                   <textarea
+                    ref={circleChatComposerRef}
                     className="chat-input chat-input-multiline"
                     placeholder="Write into the circle chat..."
                     value={chatDraft}
                     rows={1}
                     onChange={event => setChatDraft(event.target.value)}
+                    onKeyDown={event => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        submitCircleMessage();
+                      }
+                    }}
                   />
                   <button
                     className="chat-send-btn"
                     type="button"
                     disabled={!chatDraft.trim()}
-                    onClick={() => {
-                      onSendCircleMessage(activeCircle.id, chatDraft);
-                      setChatDraft("");
-                    }}
+                    onClick={submitCircleMessage}
                   >
                     <Icon.Send />
                   </button>
@@ -2498,10 +3344,7 @@ export default function SharePass() {
     })));
   }, [currentUserId]);
 
-  const handleOpenCircle = useCallback(async circleId => {
-    setActiveCircleId(circleId);
-    setView("circles");
-    setMobileIdentityOpen(false);
+  const handleMarkCircleRead = useCallback(async circleId => {
     try {
       await persistCircleRequest("PATCH", {
         action: "mark-read",
@@ -2511,6 +3354,13 @@ export default function SharePass() {
       console.error("Failed to mark circle as read", error);
     }
   }, [persistCircleRequest]);
+
+  const handleOpenCircle = useCallback(async circleId => {
+    setActiveCircleId(circleId);
+    setView("circles");
+    setMobileIdentityOpen(false);
+    await handleMarkCircleRead(circleId);
+  }, [handleMarkCircleRead]);
 
   const handleBackToCircleDirectory = useCallback(() => {
     setActiveCircleId("");
@@ -2912,6 +3762,7 @@ export default function SharePass() {
               onDeleteCircle={handleDeleteCircle}
               onInviteSpeaker={handleInviteSpeaker}
               onJoinCircle={handleJoinCircle}
+              onMarkCircleRead={handleMarkCircleRead}
               onMoveToAudience={handleMoveToAudience}
               onOpenCircle={handleOpenCircle}
               onPostAnnouncement={handlePostAnnouncement}
