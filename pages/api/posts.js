@@ -1,3 +1,4 @@
+import { mergeWarnings, readJsonObjectBody } from "../../lib/api-route-utils";
 import { buildNewPost, EMOTIONS, normalizePost, SEED_POSTS } from "../../lib/sharepass-data";
 import { getMongoCollectionName, getMongoDb } from "../../lib/mongodb";
 
@@ -50,18 +51,31 @@ export default async function handler(req, res) {
   const { db, storage, warning } = await resolveStorage();
 
   if (req.method === "GET") {
-    if (db) {
-      const posts = await db
-        .collection(getMongoCollectionName())
-        .find({}, { projection: { _id: 0 } })
-        .sort({ createdAt: -1 })
-        .limit(50)
-        .toArray();
+    try {
+      if (db) {
+        const posts = await db
+          .collection(getMongoCollectionName())
+          .find({}, { projection: { _id: 0 } })
+          .sort({ createdAt: -1 })
+          .limit(50)
+          .toArray();
+
+        return res.status(200).json({
+          posts: posts.map(normalizePost),
+          storage,
+          warning,
+        });
+      }
+    } catch (error) {
+      console.error("Post feed loading fell back to memory", error);
 
       return res.status(200).json({
-        posts: posts.map(normalizePost),
-        storage,
-        warning,
+        posts: sortPosts(localPosts),
+        storage: "memory",
+        warning: mergeWarnings(
+          warning,
+          "MongoDB read failed, so SharePass returned in-memory demo posts for now.",
+        ),
       });
     }
 
@@ -73,11 +87,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const content = String(req.body?.content || "").trim();
-    const reflection = String(req.body?.reflection || "").trim();
-    const emotion = String(req.body?.emotion || "").trim();
-    const visibility = String(req.body?.visibility || "public").trim();
-    const username = String(req.body?.username || "").trim();
+    const parsedBody = readJsonObjectBody(req);
+
+    if (!parsedBody.ok) {
+      return res.status(400).json({ error: parsedBody.error });
+    }
+
+    const body = parsedBody.body;
+    const content = String(body.content || "").trim();
+    const reflection = String(body.reflection || "").trim();
+    const emotion = String(body.emotion || "").trim();
+    const visibility = String(body.visibility || "public").trim();
+    const username = String(body.username || "").trim();
 
     if (content.length < 10) {
       return res.status(400).json({ error: "Posts should contain at least 10 characters." });
@@ -100,7 +121,21 @@ export default async function handler(req, res) {
     });
 
     if (db) {
-      await db.collection(getMongoCollectionName()).insertOne(post);
+      try {
+        await db.collection(getMongoCollectionName()).insertOne(post);
+      } catch (error) {
+        console.error("Post persistence fell back to memory", error);
+        localPosts = sortPosts([post, ...localPosts]);
+
+        return res.status(201).json({
+          post,
+          storage: "memory",
+          warning: mergeWarnings(
+            warning,
+            "MongoDB write failed, so SharePass saved this post in local demo storage for now.",
+          ),
+        });
+      }
     } else {
       localPosts = sortPosts([post, ...localPosts]);
     }

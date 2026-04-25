@@ -756,7 +756,7 @@ export default function SharePassLanding() {
         <section className="entry-copy-panel">
           <div className="entry-brand">
             <div className="entry-brand-mark">
-              <Icon.Logo />
+              <Icon.Logo theme={theme} size={36} />
             </div>
             <div className="entry-brand-copy">
               <span className="entry-brand-name">SharePass</span>

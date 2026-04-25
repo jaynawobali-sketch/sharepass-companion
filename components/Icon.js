@@ -1,20 +1,9 @@
+import BrandLogo from "./BrandLogo";
+
 // ─── SVG ICON SYSTEM ──────────────────────────────────────────────────────────
 const Icon = {
-  // Shield-bubble fusion logo
-  Logo: () => (
-    <div style={{
-      fontSize: '16px',
-      fontWeight: '600',
-      color: 'var(--accent)',
-      letterSpacing: '0.5px',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: '24px',
-      height: '24px'
-    }}>
-      SP
-    </div>
+  Logo: ({ theme = "dark", size = 24, className = "", alt = "SharePass logo" }) => (
+    <BrandLogo theme={theme} size={size} className={className} alt={alt} />
   ),
   Feed: ({ active }) => (
     <svg width="18" height="18" viewBox="0 0 20 20" fill="none">

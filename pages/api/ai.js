@@ -1,17 +1,51 @@
-import { buildChatResponse, buildExpressResponse } from "../../lib/sharepass-ai";
+import { readJsonObjectBody } from "../../lib/api-route-utils";
+import {
+  buildChatResponse,
+  buildExpressResponse,
+  getAssistantProviderStatus,
+} from "../../lib/sharepass-ai";
 
 function sendMethodNotAllowed(res) {
-  res.setHeader("Allow", "POST");
+  res.setHeader("Allow", "GET, POST");
   return res.status(405).json({ error: "Method not allowed." });
 }
 
+function normalizeMode(value) {
+  const mode = String(value || "vent").trim().toLowerCase();
+
+  if (["vent", "reflect", "advice"].includes(mode)) {
+    return mode;
+  }
+
+  return "vent";
+}
+
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
+  if (req.method !== "GET" && req.method !== "POST") {
     return sendMethodNotAllowed(res);
   }
 
+  if (req.method === "GET") {
+    return res.status(200).json({
+      ok: true,
+      tasks: ["express", "chat"],
+      assistant: getAssistantProviderStatus(),
+    });
+  }
+
   try {
-    const { task, text = "", emotion = "", mode = "vent", messages = [] } = req.body || {};
+    const parsedBody = readJsonObjectBody(req);
+
+    if (!parsedBody.ok) {
+      return res.status(400).json({ error: parsedBody.error });
+    }
+
+    const body = parsedBody.body;
+    const task = String(body.task || "").trim().toLowerCase();
+    const text = String(body.text || "");
+    const emotion = String(body.emotion || "").trim().toLowerCase();
+    const mode = normalizeMode(body.mode);
+    const messages = Array.isArray(body.messages) ? body.messages : [];
 
     if (task === "express") {
       if (text.trim().length < 10) {
