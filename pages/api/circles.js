@@ -11,7 +11,9 @@ import {
   syncCircleVoiceSession,
 } from "../../lib/sharepass-circles";
 import {
+  clearCircleVoiceRoom,
   isAdminEmail,
+  removeCircleVoiceParticipant,
   readCircles,
   replaceCircles,
   resolveStore,
@@ -511,6 +513,8 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: "Only admins can delete circles." });
       }
 
+      await clearCircleVoiceRoom(db, circleId);
+
       const nextCircles = await replaceCircles(
         db,
         circles.filter(circle => circle.id !== circleId),
@@ -524,6 +528,18 @@ export default async function handler(req, res) {
     }
 
     const nextCircles = await replaceCircles(db, replaceCircleInList(circles, nextCircle));
+
+    if (action === "toggle-voice-session" && !nextCircle.voiceSession?.active) {
+      await clearCircleVoiceRoom(db, circleId);
+    }
+
+    if (action === "remove-member") {
+      const targetMemberId = cleanString(body.memberId);
+
+      if (targetMemberId) {
+        await removeCircleVoiceParticipant(db, circleId, targetMemberId);
+      }
+    }
 
     return res.status(200).json({
       circles: nextCircles,
