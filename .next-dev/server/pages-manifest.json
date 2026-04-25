@@ -3,10 +3,10 @@
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
   "/api/users": "pages/api/users.js",
-  "/api/circles": "pages/api/circles.js",
-  "/app": "pages/app.js",
   "/": "pages/index.js",
-  "/api/admin": "pages/api/admin.js",
+  "/app": "pages/app.js",
+  "/api/circles": "pages/api/circles.js",
+  "/404": "pages/404.js",
   "/api/posts": "pages/api/posts.js",
-  "/api/circle-voice": "pages/api/circle-voice.js"
+  "/api/admin": "pages/api/admin.js"
 }
