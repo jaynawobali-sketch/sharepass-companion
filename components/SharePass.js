@@ -1347,17 +1347,22 @@ function CircleVoicePanel({
     }
 
     connection.ontrack = event => {
-      const [remoteStream] = event.streams;
+      const [eventStream] = Array.isArray(event.streams) ? event.streams : [];
 
-      if (!remoteStream) {
-        return;
-      }
+      setRemoteStreams(currentStreams => {
+        const existingStream = currentStreams[remoteMemberId];
+        const nextStream = eventStream || existingStream || new MediaStream();
 
-      setRemoteStreams(currentStreams => (
-        currentStreams[remoteMemberId] === remoteStream
-          ? currentStreams
-          : { ...currentStreams, [remoteMemberId]: remoteStream }
-      ));
+        if (event.track && !nextStream.getTracks().some(track => track.id === event.track.id)) {
+          nextStream.addTrack(event.track);
+        }
+
+        if (existingStream === nextStream) {
+          return currentStreams;
+        }
+
+        return { ...currentStreams, [remoteMemberId]: nextStream };
+      });
     };
 
     connection.onicecandidate = event => {
