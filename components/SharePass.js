@@ -1509,6 +1509,15 @@ function CircleVoicePanel({
         if (node.srcObject !== remoteStream) {
           node.srcObject = remoteStream;
         }
+
+        if (node.muted) {
+          node.muted = false;
+        }
+
+        const maybePromise = node.play?.();
+        if (maybePromise && typeof maybePromise.catch === "function") {
+          maybePromise.catch(() => null);
+        }
       } else if (node.srcObject) {
         node.srcObject = null;
       }
