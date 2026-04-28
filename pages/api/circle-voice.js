@@ -26,15 +26,10 @@ function normalizeSessionProfile(sessionProfile = {}) {
     username: cleanString(sessionProfile.username),
     displayName: cleanString(sessionProfile.displayName),
     email: cleanString(sessionProfile.email).toLowerCase(),
-    voiceMemberId: cleanString(sessionProfile.voiceMemberId),
   };
 }
 
 function resolveActorId(sessionProfile) {
-  if (sessionProfile.voiceMemberId) {
-    return sessionProfile.voiceMemberId;
-  }
-
   return createCurrentMemberId(sessionProfile);
 }
 
