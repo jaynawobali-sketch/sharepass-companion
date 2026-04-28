@@ -1263,6 +1263,7 @@ function CircleVoicePanel({
       email: sessionProfile.email || "",
       username: sessionProfile.username || "",
       displayName: sessionProfile.displayName || "",
+      memberId: sessionProfile.memberId || "",
     });
     const response = await requestJson(`/api/circle-voice?${query.toString()}`);
 
@@ -3601,9 +3602,18 @@ export default function SharePass() {
     const normalizedSession = saveSharePassSession(window.localStorage, savedSession) || savedSession;
     ensureSuperAdminEmails(window.localStorage, normalizedSession);
 
+    const storedMemberId = window.localStorage.getItem(SESSION_KEYS.memberId);
+    const memberId = storedMemberId || `member-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    if (!storedMemberId) {
+      window.localStorage.setItem(SESSION_KEYS.memberId, memberId);
+    }
+
     setEntryMethod(normalizedSession.entryMethod);
     setUsername(normalizedSession.username);
-    setSessionProfile(normalizedSession);
+    setSessionProfile({
+      ...normalizedSession,
+      memberId,
+    });
     setIsSuperAdmin(isSuperAdminSession(window.localStorage, normalizedSession));
     setSessionReady(true);
   }, [router]);
