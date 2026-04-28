@@ -1495,7 +1495,14 @@ function CircleVoicePanel({
     if (!audioJoined) return;
 
     if (!localStreamRef.current) {
-      setVoiceError("Your microphone is not active right now. Rejoin the audio room to enable mute controls.");
+      setVoiceError("");
+      setVoiceStatus("Reconnecting your microphone…");
+
+      if (!audioBusy) {
+        await handleJoinAudio();
+      } else {
+        setVoiceError("Your microphone is not active right now. Tap Join Audio Room to reconnect.");
+      }
       return;
     }
 
@@ -1515,7 +1522,7 @@ function CircleVoicePanel({
       syncCurrentParticipantMute(micMuted);
       setVoiceError(error.message || "The microphone state could not be updated right now.");
     }
-  }, [applyMuteState, audioJoined, micMuted, postVoiceAction, syncCurrentParticipantMute]);
+  }, [applyMuteState, audioBusy, audioJoined, handleJoinAudio, micMuted, postVoiceAction, syncCurrentParticipantMute]);
 
   const bindRemoteAudioRef = useCallback((memberId, node) => {
     if (node) {
