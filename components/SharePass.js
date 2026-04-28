@@ -1258,12 +1258,20 @@ function CircleVoicePanel({
       return null;
     }
 
+    const storedVoiceMemberId = typeof window !== "undefined"
+      ? window.localStorage.getItem(SESSION_KEYS.voiceMemberId)
+      : "";
+    const voiceMemberId = storedVoiceMemberId || `voice-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    if (typeof window !== "undefined" && !storedVoiceMemberId) {
+      window.localStorage.setItem(SESSION_KEYS.voiceMemberId, voiceMemberId);
+    }
+
     const query = new URLSearchParams({
       circleId: activeCircleId,
       email: sessionProfile.email || "",
       username: sessionProfile.username || "",
       displayName: sessionProfile.displayName || "",
-      memberId: sessionProfile.memberId || "",
+      voiceMemberId,
     });
     const response = await requestJson(`/api/circle-voice?${query.toString()}`);
 
@@ -3602,18 +3610,9 @@ export default function SharePass() {
     const normalizedSession = saveSharePassSession(window.localStorage, savedSession) || savedSession;
     ensureSuperAdminEmails(window.localStorage, normalizedSession);
 
-    const storedMemberId = window.localStorage.getItem(SESSION_KEYS.memberId);
-    const memberId = storedMemberId || `member-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
-    if (!storedMemberId) {
-      window.localStorage.setItem(SESSION_KEYS.memberId, memberId);
-    }
-
     setEntryMethod(normalizedSession.entryMethod);
     setUsername(normalizedSession.username);
-    setSessionProfile({
-      ...normalizedSession,
-      memberId,
-    });
+    setSessionProfile(normalizedSession);
     setIsSuperAdmin(isSuperAdminSession(window.localStorage, normalizedSession));
     setSessionReady(true);
   }, [router]);
