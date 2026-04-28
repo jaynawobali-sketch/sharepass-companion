@@ -245,12 +245,24 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Choose a valid voice target and signal type." });
       }
 
+      if (toMemberId === actorId) {
+        return res.status(400).json({ error: "Voice signals must target another participant." });
+      }
+
       const roomWithParticipant = await upsertCircleVoiceParticipant(db, circleId, {
         memberId: actorId,
         name: currentMember?.name || actorName,
         role: currentMember?.role || (isAdminEmail(sessionProfile.email) ? "moderator" : "member"),
         muted: Boolean(body.muted),
       });
+
+      const receiverConnected = roomWithParticipant.participants
+        .some(participant => participant.memberId === toMemberId);
+
+      if (!receiverConnected) {
+        return res.status(400).json({ error: "The target participant is not connected to audio right now." });
+      }
+
       const room = await addCircleVoiceSignal(db, circleId, {
         fromMemberId: actorId,
         toMemberId,

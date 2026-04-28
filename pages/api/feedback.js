@@ -1,4 +1,5 @@
 import { readJsonObjectBody } from "../../lib/api-route-utils";
+import { readAdminSessionEmailFromRequest } from "../../lib/sharepass-admin-session";
 import {
   isAdminEmail,
   readFeedback,
@@ -24,6 +25,20 @@ function hasAdminAccess(email) {
   return isAdminEmail(email);
 }
 
+function resolveEffectiveAdminEmail(req, body = {}) {
+  const cookieAdminEmail = readAdminSessionEmailFromRequest(req);
+
+  if (cookieAdminEmail) {
+    return cookieAdminEmail;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    return cleanString(body.viewerEmail || req.query?.viewerEmail).toLowerCase();
+  }
+
+  return "";
+}
+
 function sendMethodNotAllowed(res) {
   res.setHeader("Allow", "GET, POST, PATCH");
   return res.status(405).json({ error: "Method not allowed." });
@@ -37,8 +52,10 @@ export default async function handler(req, res) {
   const { db, storage, warning } = await resolveStore();
 
   try {
+    const queryAdminEmail = resolveEffectiveAdminEmail(req);
+
     if (req.method === "GET") {
-      const viewerEmail = cleanString(req.query.viewerEmail).toLowerCase();
+      const viewerEmail = queryAdminEmail;
       if (!hasAdminAccess(viewerEmail)) {
         return res.status(403).json({ error: "Only admins can view feedback." });
       }
@@ -101,7 +118,7 @@ export default async function handler(req, res) {
 
     const feedbackId = cleanString(body.feedbackId);
     const status = cleanString(body.status).toLowerCase();
-    const viewerEmail = cleanString(body.viewerEmail).toLowerCase();
+    const viewerEmail = resolveEffectiveAdminEmail(req, body);
     if (!hasAdminAccess(viewerEmail)) {
       return res.status(403).json({ error: "Only admins can update feedback." });
     }

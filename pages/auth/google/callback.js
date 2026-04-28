@@ -10,6 +10,11 @@ import {
   isGoogleOAuthConfigured,
   resolveRequestOrigin,
 } from "../../../lib/sharepass-google-auth";
+import {
+  buildAdminSessionCookie,
+  buildClearedAdminSessionCookie,
+} from "../../../lib/sharepass-admin-session";
+import { isAdminEmail } from "../../../lib/sharepass-server-store";
 
 function clearStateCookie(origin) {
   const isSecure = origin.startsWith("https://");
@@ -24,9 +29,36 @@ function clearStateCookie(origin) {
   ].filter(Boolean).join("; ");
 }
 
+function setCallbackCookies({ context, origin, email }) {
+  const isSecure = origin.startsWith("https://");
+  const cookies = [
+    clearStateCookie(origin),
+    buildClearedAdminSessionCookie({ secure: isSecure }),
+  ];
+
+  if (isAdminEmail(email)) {
+    const adminSessionCookie = buildAdminSessionCookie({ email, secure: isSecure });
+    if (adminSessionCookie) {
+      cookies.push(adminSessionCookie);
+    }
+  }
+
+  context.res.setHeader("Set-Cookie", cookies);
+}
+
 export async function getServerSideProps(context) {
-  const origin = resolveRequestOrigin(context.req);
-  context.res.setHeader("Set-Cookie", clearStateCookie(origin));
+  let origin;
+  try {
+    origin = resolveRequestOrigin(context.req);
+  } catch {
+    return {
+      props: {
+        error: "Google sign-in origin is invalid. Check APP_URL or proxy host settings and try again.",
+      },
+    };
+  }
+
+  setCallbackCookies({ context, origin, email: "" });
 
   if (!isGoogleOAuthConfigured()) {
     return {
@@ -68,6 +100,8 @@ export async function getServerSideProps(context) {
         },
       };
     }
+
+    setCallbackCookies({ context, origin, email: googleProfile.email });
 
     return {
       props: {

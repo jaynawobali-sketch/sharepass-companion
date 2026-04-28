@@ -19,17 +19,26 @@ function buildStateCookie(value, isSecure) {
 export default function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
-    return res.status(405).json({ error: "Method not allowed." });
+    res.status(405).json({ error: "Method not allowed." });
+    return;
   }
 
   if (!isGoogleOAuthConfigured()) {
-    return res.redirect("/?sheet=1&reason=google-oauth-unavailable");
+    res.redirect("/?sheet=1&reason=google-oauth-unavailable");
+    return;
   }
 
-  const origin = resolveRequestOrigin(req);
+  let origin;
+  try {
+    origin = resolveRequestOrigin(req);
+  } catch {
+    res.redirect("/?sheet=1&reason=google-origin-invalid");
+    return;
+  }
+
   const state = createGoogleState();
   const isSecure = origin.startsWith("https://");
 
   res.setHeader("Set-Cookie", buildStateCookie(state, isSecure));
-  return res.redirect(buildGoogleAuthorizationUrl({ origin, state }));
+  res.redirect(buildGoogleAuthorizationUrl({ origin, state }));
 }

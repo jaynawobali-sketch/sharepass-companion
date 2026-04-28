@@ -35,7 +35,9 @@ async function requestJson(url, options = {}) {
   const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new Error(payload?.error || "Something went wrong. Please try again.");
+    const error = new Error(payload?.error || "Something went wrong. Please try again.");
+    error.status = response.status;
+    throw error;
   }
 
   return payload;
@@ -3568,6 +3570,7 @@ export default function SharePass() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const lastNonChatViewRef = useRef("home");
+  const lastUserSyncSignatureRef = useRef("");
   const isGuest = isGuestEntry(entryMethod);
   const currentUserId = sessionProfile ? createCurrentMemberId(sessionProfile) : "";
 
@@ -3752,6 +3755,18 @@ export default function SharePass() {
   useEffect(() => {
     if (!sessionReady || isGuest || !sessionProfile?.email) return;
 
+    const nextSyncSignature = JSON.stringify({
+      email: sessionProfile.email,
+      mood: currentMood,
+      joinedCircleIds: joinedCircles.map(circle => circle.id).sort(),
+    });
+
+    if (lastUserSyncSignatureRef.current === nextSyncSignature) {
+      return;
+    }
+
+    lastUserSyncSignatureRef.current = nextSyncSignature;
+
     let active = true;
 
     void requestJson("/api/users", {
@@ -3761,11 +3776,10 @@ export default function SharePass() {
         currentMood,
         joinedCircleIds: joinedCircles.map(circle => circle.id),
       }),
-    }).then(response => {
-      if (active) {
-        setIsSuperAdmin(response.user?.role === "super-admin");
-      }
     }).catch(error => {
+      if (active) {
+        lastUserSyncSignatureRef.current = "";
+      }
       console.error("Failed to sync user state", error);
     });
 

@@ -5,6 +5,7 @@ import {
   readUsers,
   resolveStore,
 } from "../../lib/sharepass-server-store";
+import { readAdminSessionEmailFromRequest } from "../../lib/sharepass-admin-session";
 
 function cleanString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -14,13 +15,27 @@ function hasAdminAccess(email) {
   return isAdminEmail(email);
 }
 
+function resolveEffectiveAdminEmail(req) {
+  const cookieAdminEmail = readAdminSessionEmailFromRequest(req);
+
+  if (cookieAdminEmail) {
+    return cookieAdminEmail;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    return cleanString(req.query?.viewerEmail).toLowerCase();
+  }
+
+  return "";
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
     return res.status(405).json({ error: "Method not allowed." });
   }
 
-  const viewerEmail = cleanString(req.query.viewerEmail).toLowerCase();
+  const viewerEmail = resolveEffectiveAdminEmail(req);
   if (!hasAdminAccess(viewerEmail)) {
     return res.status(403).json({ error: "Only admins can view dashboard data." });
   }

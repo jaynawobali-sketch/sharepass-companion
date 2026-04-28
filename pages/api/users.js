@@ -1,5 +1,6 @@
 import { readJsonObjectBody } from "../../lib/api-route-utils";
 import { createCurrentMemberId, normalizeCircle, syncCircleVoiceSession } from "../../lib/sharepass-circles";
+import { readAdminSessionEmailFromRequest } from "../../lib/sharepass-admin-session";
 import {
   isAdminEmail,
   deleteUserByEmail,
@@ -28,6 +29,20 @@ function hasAdminAccess(email) {
   return isAdminEmail(email);
 }
 
+function resolveEffectiveAdminEmail(req, body = {}) {
+  const cookieAdminEmail = readAdminSessionEmailFromRequest(req);
+
+  if (cookieAdminEmail) {
+    return cookieAdminEmail;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    return cleanString(body.viewerEmail || req.query?.viewerEmail).toLowerCase();
+  }
+
+  return "";
+}
+
 function sendMethodNotAllowed(res) {
   res.setHeader("Allow", "GET, POST, DELETE");
   return res.status(405).json({ error: "Method not allowed." });
@@ -41,9 +56,10 @@ export default async function handler(req, res) {
   const { db, storage, warning } = await resolveStore();
 
   try {
+    const queryAdminEmail = resolveEffectiveAdminEmail(req);
+
     if (req.method === "GET") {
-      const viewerEmail = cleanString(req.query.viewerEmail).toLowerCase();
-      if (!hasAdminAccess(viewerEmail)) {
+      if (!hasAdminAccess(queryAdminEmail)) {
         return res.status(403).json({ error: "Only admins can view user records." });
       }
 
@@ -63,6 +79,7 @@ export default async function handler(req, res) {
     }
 
     const body = parsedBody.body;
+    const authenticatedAdminEmail = resolveEffectiveAdminEmail(req, body);
 
     if (req.method === "POST") {
       const sessionProfile = normalizeSessionProfile(body.sessionProfile);
@@ -83,7 +100,9 @@ export default async function handler(req, res) {
         username: sessionProfile.username || sessionProfile.displayName || sessionProfile.email.split("@")[0],
         displayName: sessionProfile.displayName || sessionProfile.username || sessionProfile.email.split("@")[0],
         entryMethod: sessionProfile.entryMethod || "email",
-        role: hasAdminAccess(sessionProfile.email) ? "super-admin" : "member",
+        role: hasAdminAccess(authenticatedAdminEmail) && sessionProfile.email === authenticatedAdminEmail
+          ? "super-admin"
+          : "member",
         currentMood: cleanString(body.currentMood) || "hopeful",
         joinedCircleIds: Array.isArray(body.joinedCircleIds) ? body.joinedCircleIds.filter(Boolean) : [],
         createdAt: sessionProfile.createdAt || new Date().toISOString(),
@@ -99,9 +118,8 @@ export default async function handler(req, res) {
       });
     }
 
-    const viewerEmail = cleanString(body.viewerEmail).toLowerCase();
     const targetEmail = cleanString(body.targetEmail).toLowerCase();
-    if (!hasAdminAccess(viewerEmail)) {
+    if (!hasAdminAccess(authenticatedAdminEmail)) {
       return res.status(403).json({ error: "Only admins can delete users." });
     }
 
