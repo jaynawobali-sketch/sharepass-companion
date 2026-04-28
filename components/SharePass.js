@@ -1445,6 +1445,27 @@ function CircleVoicePanel({
 
       if (audioTrack) {
         audioTrack.enabled = !micMuted;
+
+        audioTrack.addEventListener("ended", () => {
+          if (localStreamRef.current === stream) {
+            detachAudioRoom({
+              error: "Your microphone stream ended. Rejoin the audio room to continue speaking.",
+              clearParticipants: false,
+            });
+          }
+        });
+
+        audioTrack.addEventListener("mute", () => {
+          if (localStreamRef.current === stream) {
+            setVoiceStatus("Microphone input paused by the device/browser.");
+          }
+        });
+
+        audioTrack.addEventListener("unmute", () => {
+          if (localStreamRef.current === stream) {
+            setVoiceStatus("Microphone input is live.");
+          }
+        });
       }
 
       localStreamRef.current = stream;
@@ -1471,7 +1492,10 @@ function CircleVoicePanel({
   }, [activeCircle.voiceSession?.active, applyMuteState, currentMember, fetchVoiceRoom, micMuted, postVoiceAction]);
 
   const handleToggleMute = useCallback(async () => {
-    if (!audioJoined || !localStreamRef.current) {
+    if (!audioJoined) return;
+
+    if (!localStreamRef.current) {
+      setVoiceError("Your microphone is not active right now. Rejoin the audio room to enable mute controls.");
       return;
     }
 
