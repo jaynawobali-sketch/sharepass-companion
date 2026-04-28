@@ -63,8 +63,26 @@ const DEFAULT_ADMIN_DATA = {
     openFeedback: 0,
   },
 };
+function resolveIceServers() {
+  const servers = [{ urls: "stun:stun.l.google.com:19302" }];
+
+  const turnUrl = String(process.env.NEXT_PUBLIC_TURN_URL || "").trim();
+  const turnUsername = String(process.env.NEXT_PUBLIC_TURN_USERNAME || "").trim();
+  const turnCredential = String(process.env.NEXT_PUBLIC_TURN_CREDENTIAL || "").trim();
+
+  if (turnUrl && turnUsername && turnCredential) {
+    servers.push({
+      urls: turnUrl,
+      username: turnUsername,
+      credential: turnCredential,
+    });
+  }
+
+  return servers;
+}
+
 const WEBRTC_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  iceServers: resolveIceServers(),
 };
 const VOICE_POLL_INTERVAL_MS = 2500;
 const VOICE_HEARTBEAT_INTERVAL_MS = 5000;
@@ -1377,6 +1395,15 @@ function CircleVoicePanel({
       void sendSignal(remoteMemberId, "ice", candidatePayload).catch(error => {
         console.error("Failed to send ICE candidate", error);
       });
+    };
+
+    connection.oniceconnectionstatechange = () => {
+      const state = connection.iceConnectionState;
+
+      if (state === "failed") {
+        closePeerConnection(remoteMemberId);
+        setVoiceError("Audio connection failed (network/NAT). If this happens across devices, configure a TURN server.");
+      }
     };
 
     connection.onconnectionstatechange = () => {

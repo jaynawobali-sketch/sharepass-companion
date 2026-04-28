@@ -98,6 +98,13 @@ export default async function handler(req, res) {
         warning,
       });
     } catch (error) {
+      if (error?.code === "MONGO_UNAVAILABLE" || storage === "mongo_unavailable") {
+        return res.status(503).json({
+          error: "Database unavailable. Check MongoDB connection (Atlas network/IP allowlist, credentials, cluster status) and try again.",
+          storage,
+          warning,
+        });
+      }
       console.error("Circle loading failed", error);
       return res.status(500).json({ error: "Circle state could not be loaded right now." });
     }
@@ -585,6 +592,13 @@ export default async function handler(req, res) {
       warning: mergeWarnings(warning),
     });
   } catch (error) {
+    if (error?.code === "MONGO_UNAVAILABLE" || storage === "mongo_unavailable") {
+      return res.status(503).json({
+        error: "Database unavailable. Circle changes cannot be saved right now.",
+        storage,
+        warning,
+      });
+    }
     console.error("Circle update failed", error);
     return res.status(500).json({ error: "Circle changes could not be saved right now." });
   }

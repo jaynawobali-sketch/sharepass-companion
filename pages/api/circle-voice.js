@@ -292,6 +292,13 @@ export default async function handler(req, res) {
 
     return res.status(400).json({ error: "Unsupported voice action." });
   } catch (error) {
+    if (error?.code === "MONGO_UNAVAILABLE" || storage === "mongo_unavailable") {
+      return res.status(503).json({
+        error: "Database unavailable. The audio room cannot sync right now.",
+        storage,
+        warning,
+      });
+    }
     console.error("Circle voice route failed", error);
     return res.status(500).json({ error: "The audio room could not be updated right now." });
   }
