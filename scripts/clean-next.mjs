@@ -1,6 +1,12 @@
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+const shouldClean = String(process.env.CLEAN_NEXT || "").trim() === "1";
+
+if (!shouldClean) {
+  process.exit(0);
+}
+
 const requestedDirs = process.argv.slice(2);
 const distDirs = requestedDirs.length > 0 ? requestedDirs : [".next", ".next-dev"];
 

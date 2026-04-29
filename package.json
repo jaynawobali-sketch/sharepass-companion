@@ -10,7 +10,7 @@
     "clean": "node scripts/clean-next.mjs",
     "clean:dev": "node scripts/clean-next.mjs .next-dev",
     "clean:build": "node scripts/clean-next.mjs .next",
-    "predev": "npm run clean:dev",
+    "predev": "CLEAN_NEXT=1 npm run clean:dev",
     "prebuild": "npm run clean:build",
     "dev": "next dev",
     "build": "next build",
