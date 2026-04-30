@@ -87,6 +87,7 @@ function resolveIceServers() {
 const WEBRTC_CONFIG = {
   iceServers: resolveIceServers(),
 };
+const WEBRTC_SINGLE_PEER_DEBUG = true;
 const VOICE_POLL_INTERVAL_MS = 2500;
 const VOICE_HEARTBEAT_INTERVAL_MS = 5000;
 const EMPTY_ITEMS = [];
@@ -995,6 +996,7 @@ function CircleVoicePanel({
   const [voiceStatus, setVoiceStatus] = useState("");
   const [voiceError, setVoiceError] = useState("");
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [pipelineStage, setPipelineStage] = useState("idle");
   const [clockNowMs, setClockNowMs] = useState(Date.now());
   const [localAudioLevel, setLocalAudioLevel] = useState(0);
   const [remoteAudioLevels, setRemoteAudioLevels] = useState({});
@@ -1005,6 +1007,7 @@ function CircleVoicePanel({
   const processedSignalIdsRef = useRef(new Set());
   const remoteAudioRefs = useRef({});
   const pendingPlaybackMembersRef = useRef(new Set());
+  const statsIntervalsRef = useRef({});
   const audioContextRef = useRef(null);
   const analyserEntriesRef = useRef({});
   const meterFrameRef = useRef(null);
@@ -1045,6 +1048,10 @@ function CircleVoicePanel({
     }
 
     delete pendingIceCandidatesRef.current[remoteMemberId];
+    if (statsIntervalsRef.current[remoteMemberId]) {
+      window.clearInterval(statsIntervalsRef.current[remoteMemberId]);
+      delete statsIntervalsRef.current[remoteMemberId];
+    }
     setRemoteStreams(currentStreams => {
       if (!currentStreams[remoteMemberId]) {
         return currentStreams;
@@ -1233,6 +1240,7 @@ function CircleVoicePanel({
     resetAudioAnalysis();
     pendingPlaybackMembersRef.current.clear();
     setAutoplayBlocked(false);
+    setPipelineStage("idle");
     setRemoteStreams({});
     setAudioJoined(false);
     setAudioBusy(false);
@@ -1366,6 +1374,13 @@ function CircleVoicePanel({
     const connection = new RTCPeerConnection(WEBRTC_CONFIG);
 
     if (localStreamRef.current) {
+      console.info("[voice] local tracks before send", localStreamRef.current.getTracks().map(track => ({
+        id: track.id,
+        kind: track.kind,
+        enabled: track.enabled,
+        muted: track.muted,
+        readyState: track.readyState,
+      })));
       localStreamRef.current.getAudioTracks().forEach(track => {
         connection.addTrack(track, localStreamRef.current);
         console.info("[voice] addTrack", {
@@ -1381,6 +1396,18 @@ function CircleVoicePanel({
 
     connection.ontrack = event => {
       const [eventStream] = Array.isArray(event.streams) ? event.streams : [];
+      const incomingStream = eventStream || new MediaStream([event.track].filter(Boolean));
+      console.info("[voice] received tracks in ontrack", {
+        remoteMemberId,
+        streamId: incomingStream.id,
+        tracks: incomingStream.getTracks().map(track => ({
+          id: track.id,
+          kind: track.kind,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+        })),
+      });
       console.info("[voice] ontrack", {
         remoteMemberId,
         streamId: eventStream?.id || "",
@@ -1405,6 +1432,7 @@ function CircleVoicePanel({
 
         return { ...currentStreams, [remoteMemberId]: nextStream };
       });
+      setPipelineStage("receive");
     };
 
     connection.onicecandidate = event => {
@@ -1423,6 +1451,10 @@ function CircleVoicePanel({
 
     connection.oniceconnectionstatechange = () => {
       const state = connection.iceConnectionState;
+      console.info("[voice] ICE state change", { remoteMemberId, state });
+      if (["connected", "completed"].includes(state)) {
+        setPipelineStage("transport");
+      }
 
       if (state === "failed") {
         closePeerConnection(remoteMemberId);
@@ -1431,6 +1463,7 @@ function CircleVoicePanel({
     };
 
     connection.onconnectionstatechange = () => {
+      console.info("[voice] Peer connection state", { remoteMemberId, state: connection.connectionState });
       if (["failed", "closed"].includes(connection.connectionState)) {
         closePeerConnection(remoteMemberId);
         return;
@@ -1449,6 +1482,35 @@ function CircleVoicePanel({
 
     pendingIceCandidatesRef.current[remoteMemberId] = pendingIceCandidatesRef.current[remoteMemberId] || [];
     peerConnectionsRef.current[remoteMemberId] = connection;
+    statsIntervalsRef.current[remoteMemberId] = window.setInterval(async () => {
+      try {
+        const stats = await connection.getStats();
+        let bytesSent = 0;
+        let bytesReceived = 0;
+
+        stats.forEach(report => {
+          if (report.type === "outbound-rtp" && report.kind === "audio") {
+            bytesSent += Number(report.bytesSent || 0);
+          }
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            bytesReceived += Number(report.bytesReceived || 0);
+          }
+        });
+
+        console.info("[voice] RTP stats", { remoteMemberId, bytesSent, bytesReceived });
+        if (bytesSent > 0) {
+          setPipelineStage(currentStage => currentStage === "capture" ? "send" : currentStage);
+        }
+        if (bytesReceived > 0) {
+          setPipelineStage("receive");
+        }
+      } catch (error) {
+        console.warn("[voice] Failed to read peer stats", {
+          remoteMemberId,
+          message: String(error?.message || error || ""),
+        });
+      }
+    }, 3000);
 
     if (initiateOffer) {
       const offer = await connection.createOffer();
@@ -1509,6 +1571,7 @@ function CircleVoicePanel({
         muted: audioTrack.muted,
         readyState: audioTrack.readyState,
       });
+      setPipelineStage("capture");
 
       audioTrack.addEventListener("ended", () => {
         if (localStreamRef.current === stream) {
@@ -1635,6 +1698,8 @@ function CircleVoicePanel({
               message: String(error?.message || error || ""),
             });
           });
+        } else {
+          setPipelineStage("playback");
         }
       } else if (node.srcObject) {
         node.srcObject = null;
@@ -1664,6 +1729,7 @@ function CircleVoicePanel({
               if (pendingPlaybackMembersRef.current.size === 0) {
                 setAutoplayBlocked(false);
               }
+              setPipelineStage("playback");
               console.info("[voice] remote audio resumed after interaction", { memberId });
             })
             .catch(() => null);
@@ -1831,9 +1897,16 @@ function CircleVoicePanel({
       return;
     }
 
-    const remoteMemberIds = voiceParticipants
+    const allRemoteMemberIds = voiceParticipants
       .map(participant => participant.memberId)
       .filter(memberId => memberId && memberId !== currentUserId);
+    const remoteMemberIds = WEBRTC_SINGLE_PEER_DEBUG ? allRemoteMemberIds.slice(0, 1) : allRemoteMemberIds;
+    if (WEBRTC_SINGLE_PEER_DEBUG && allRemoteMemberIds.length > 1) {
+      console.warn("[voice] single-peer debug mode active", {
+        selectedPeer: remoteMemberIds[0] || "",
+        skippedPeers: allRemoteMemberIds.slice(1),
+      });
+    }
 
     remoteMemberIds.forEach(remoteMemberId => {
       if (!peerConnectionsRef.current[remoteMemberId] && currentUserId.localeCompare(remoteMemberId) < 0) {
@@ -1872,6 +1945,18 @@ function CircleVoicePanel({
           if (signal.fromMemberId === currentUserId) {
             acknowledgedSignals.push(signal.id);
             continue;
+          }
+
+          if (WEBRTC_SINGLE_PEER_DEBUG) {
+            const selectedPeer = voiceParticipants
+              .map(participant => participant.memberId)
+              .filter(memberId => memberId && memberId !== currentUserId)
+              .sort()[0];
+
+            if (selectedPeer && signal.fromMemberId !== selectedPeer) {
+              acknowledgedSignals.push(signal.id);
+              continue;
+            }
           }
 
           if (signal.type === "offer") {
@@ -1942,7 +2027,7 @@ function CircleVoicePanel({
     return () => {
       cancelled = true;
     };
-  }, [audioJoined, currentUserId, ensurePeerConnection, flushPendingIceCandidates, postVoiceAction, sendSignal, voiceRoom.signals]);
+  }, [audioJoined, currentUserId, ensurePeerConnection, flushPendingIceCandidates, postVoiceAction, sendSignal, voiceParticipants, voiceRoom.signals]);
 
   useEffect(() => {
     if (currentMember || (!audioJoined && !localStreamRef.current)) {
@@ -1991,6 +2076,10 @@ function CircleVoicePanel({
     Object.values(peerConnectionsRef.current).forEach(connection => {
       connection?.close();
     });
+    Object.values(statsIntervalsRef.current).forEach(intervalId => {
+      window.clearInterval(intervalId);
+    });
+    statsIntervalsRef.current = {};
 
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -2181,6 +2270,9 @@ function CircleVoicePanel({
               Browser audio autoplay is blocked. Tap anywhere (or press any key) to start remote audio playback.
             </div>
           ) : null}
+          <div className="circle-voice-feedback">
+            Audio pipeline stage: {pipelineStage}{WEBRTC_SINGLE_PEER_DEBUG ? " (1-to-1 debug mode)" : ""}
+          </div>
           {voiceStatus ? <div className="circle-voice-feedback">{voiceStatus}</div> : null}
           {voiceError ? <div className="circle-voice-feedback error">{voiceError}</div> : null}
         </div>
@@ -2252,13 +2344,17 @@ function CircleVoicePanel({
       </div>
 
       {Object.entries(remoteStreams).map(([memberId, stream]) => (
-        <audio
-          key={memberId}
-          autoPlay
-          playsInline
-          ref={node => bindRemoteAudioRef(memberId, node)}
-          data-stream-id={stream.id}
-        />
+        <div key={memberId} style={{ marginTop: 10 }}>
+          <div className="sp-label">Remote audio sink: {memberId}</div>
+          <audio
+            autoPlay
+            playsInline
+            controls
+            ref={node => bindRemoteAudioRef(memberId, node)}
+            data-stream-id={stream.id}
+            style={{ width: "100%", maxWidth: 360 }}
+          />
+        </div>
       ))}
     </div>
   );
