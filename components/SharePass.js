@@ -1445,6 +1445,11 @@ function CircleVoicePanel({
         : event.candidate;
 
       void sendSignal(remoteMemberId, "ice", candidatePayload).catch(error => {
+        const message = String(error?.message || error || "");
+        if (/target participant is not connected/i.test(message)) {
+          console.info("[voice] ICE send deferred until peer is ready", { remoteMemberId, message });
+          return;
+        }
         console.error("Failed to send ICE candidate", error);
       });
     };
@@ -1513,14 +1518,29 @@ function CircleVoicePanel({
     }, 3000);
 
     if (initiateOffer) {
-      const offer = await connection.createOffer();
-      await connection.setLocalDescription(offer);
-      const offerPayload = typeof connection.localDescription?.toJSON === "function"
-        ? connection.localDescription.toJSON()
-        : connection.localDescription;
+      try {
+        const offer = await connection.createOffer();
+        await connection.setLocalDescription(offer);
+        const offerPayload = typeof connection.localDescription?.toJSON === "function"
+          ? connection.localDescription.toJSON()
+          : connection.localDescription;
 
-      if (offerPayload) {
-        await sendSignal(remoteMemberId, "offer", offerPayload);
+        if (offerPayload) {
+          await sendSignal(remoteMemberId, "offer", offerPayload);
+          setPipelineStage("send");
+        }
+      } catch (error) {
+        const message = String(error?.message || error || "");
+        const targetNotReady = /target participant is not connected/i.test(message);
+
+        if (targetNotReady) {
+          setVoiceStatus("Peer joined the room but is not fully ready yet. Retrying audio negotiation...");
+          closePeerConnection(remoteMemberId);
+          return null;
+        }
+
+        closePeerConnection(remoteMemberId);
+        throw error;
       }
     }
 
@@ -1909,14 +1929,17 @@ function CircleVoicePanel({
     }
 
     remoteMemberIds.forEach(remoteMemberId => {
-      const shouldInitiateOffer = WEBRTC_SINGLE_PEER_DEBUG
-        ? true
-        : currentUserId.localeCompare(remoteMemberId) < 0;
+      const shouldInitiateOffer = currentUserId.localeCompare(remoteMemberId) < 0;
 
       if (!peerConnectionsRef.current[remoteMemberId] && shouldInitiateOffer) {
         void ensurePeerConnection(remoteMemberId, true).catch(error => {
           console.error("Failed to open voice connection", error);
-          setVoiceError("A participant connection could not be opened. The room will keep retrying.");
+          const message = String(error?.message || error || "");
+          if (/target participant is not connected/i.test(message)) {
+            setVoiceStatus("Waiting for the other participant audio channel to become ready...");
+            return;
+          }
+          setVoiceError(`A participant connection could not be opened: ${message || "unknown error"}`);
         });
       }
     });
