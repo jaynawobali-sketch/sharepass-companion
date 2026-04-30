@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SharePass Audio Test</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .test-container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      margin-top: 0;
+    }
+    .test-section {
+      margin: 20px 0;
+      padding: 15px;
+      border-left: 4px solid #007bff;
+      background: #f9f9f9;
+    }
+    .test-section h2 {
+      margin: 0 0 10px 0;
+      font-size: 16px;
+      color: #007bff;
+    }
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin: 5px 5px 5px 0;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .output {
+      background: #f0f0f0;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 10px;
+      margin: 10px 0;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 12px;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .status {
+      display: inline-block;
+      padding: 5px 10px;
+      border-radius: 4px;
+      margin: 5px 0;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .status.success {
+      background: #d4edda;
+      color: #155724;
+    }
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+    .status.warning {
+      background: #fff3cd;
+      color: #856404;
+    }
+    .status.info {
+      background: #d1ecf1;
+      color: #0c5460;
+    }
+  </style>
+</head>
+<body>
+  <div class="test-container">
+    <h1>🔊 SharePass Audio Diagnostic Tool</h1>
+    
+    <div class="test-section">
+      <h2>📋 Browser & Device Info</h2>
+      <button onclick="checkBrowserInfo()">Check Browser</button>
+      <button onclick="checkDevices()">Check Audio Devices</button>
+      <div id="browserOutput" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-section">
+      <h2>🎙️ Microphone Test</h2>
+      <button onclick="testMicrophone()">Test Microphone</button>
+      <button onclick="stopMicrophone()">Stop Microphone</button>
+      <div id="micStatus"></div>
+      <div id="micOutput" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-section">
+      <h2>🔊 Speaker Test</h2>
+      <button onclick="testSpeaker()">Test Speaker (Play Tone)</button>
+      <div id="speakerStatus"></div>
+      <audio id="testAudio" style="width:100%; margin: 10px 0;"></audio>
+    </div>
+
+    <div class="test-section">
+      <h2>🌐 Audio API Test</h2>
+      <button onclick="testAudioContext()">Test Audio Context</button>
+      <button onclick="testMediaStream()">Test Media Stream API</button>
+      <div id="apiOutput" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-section">
+      <h2>📊 Console Logs</h2>
+      <button onclick="clearConsoleLog()">Clear</button>
+      <button onclick="showConsoleLogs()">Show Voice Logs</button>
+      <div id="consoleLogs" class="output" style="display:none;"></div>
+    </div>
+
+    <div class="test-section">
+      <h2>🔗 SharePass Connection Test</h2>
+      <p>Open this in two separate browser windows, both in the same circle:</p>
+      <ol>
+        <li>Both click "Join Circle"</li>
+        <li>One clicks "Start Audio Room" (moderator only)</li>
+        <li>Both click "Join Audio Room"</li>
+        <li>Check console for: <code>[voice] remote audio canplay</code></li>
+      </ol>
+      <button onclick="openSharePass()">Open SharePass</button>
+      <button onclick="showAudioLogs()">Show Audio Logs</button>
+      <div id="audioLogs" class="output" style="display:none;"></div>
+    </div>
+  </div>
+
+  <script>
+    // Store console logs
+    const consoleLogs = [];
+    const originalLog = console.log;
+    const originalInfo = console.info;
+    const originalWarn = console.warn;
+    const originalError = console.error;
+
+    function logMessage(type, args) {
+      const msg = Array.from(args).map(a => 
+        typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)
+      ).join(' ');
+      consoleLogs.push({ type, msg, time: new Date().toLocaleTimeString() });
+    }
+
+    console.log = function(...args) {
+      logMessage('log', args);
+      originalLog.apply(console, args);
+    };
+    console.info = function(...args) {
+      logMessage('info', args);
+      originalInfo.apply(console, args);
+    };
+    console.warn = function(...args) {
+      logMessage('warn', args);
+      originalWarn.apply(console, args);
+    };
+    console.error = function(...args) {
+      logMessage('error', args);
+      originalError.apply(console, args);
+    };
+
+    function checkBrowserInfo() {
+      const output = document.getElementById('browserOutput');
+      output.style.display = 'block';
+      
+      const info = {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+        webRTC: !!(
+          window.RTCPeerConnection ||
+          window.webkitRTCPeerConnection ||
+          window.mozRTCPeerConnection
+        ),
+        mediaDevices: !!navigator.mediaDevices?.getUserMedia,
+        audioContext: !!(window.AudioContext || window.webkitAudioContext),
+        webWorker: typeof(Worker) !== 'undefined',
+      };
+      
+      output.textContent = JSON.stringify(info, null, 2);
+      
+      Object.entries(info).forEach(([key, val]) => {
+        const status = val ? 'success' : 'error';
+        console.log(`✓ ${key}: ${val}`);
+      });
+    }
+
+    function checkDevices() {
+      const output = document.getElementById('browserOutput');
+      output.style.display = 'block';
+      output.textContent = 'Checking audio devices...\n';
+      
+      if (!navigator.mediaDevices?.enumerateDevices) {
+        output.textContent += 'enumerateDevices not supported';
+        return;
+      }
+
+      navigator.mediaDevices.enumerateDevices()
+        .then(devices => {
+          const audioDevices = devices.filter(d => d.kind.includes('audio'));
+          output.textContent += `Found ${audioDevices.length} audio devices:\n\n`;
+          audioDevices.forEach(d => {
+            output.textContent += `${d.kind.toUpperCase()}: ${d.label || '(default)'}\n`;
+          });
+        })
+        .catch(err => {
+          output.textContent += `Error: ${err.message}`;
+        });
+    }
+
+    let micStream = null;
+
+    function testMicrophone() {
+      const statusDiv = document.getElementById('micStatus');
+      const output = document.getElementById('micOutput');
+      output.style.display = 'block';
+      output.textContent = 'Requesting microphone access...\n';
+
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+          micStream = stream;
+          const tracks = stream.getAudioTracks();
+          
+          output.textContent += `✓ Microphone access granted!\n`;
+          output.textContent += `Audio tracks: ${tracks.length}\n\n`;
+          
+          tracks.forEach((track, i) => {
+            output.textContent += `Track ${i}:\n`;
+            output.textContent += `  ID: ${track.id}\n`;
+            output.textContent += `  Label: ${track.label}\n`;
+            output.textContent += `  Enabled: ${track.enabled}\n`;
+            output.textContent += `  ReadyState: ${track.readyState}\n`;
+            output.textContent += `  Muted: ${track.muted}\n\n`;
+          });
+
+          statusDiv.innerHTML = '<div class="status success">✓ Microphone working</div>';
+        })
+        .catch(err => {
+          output.textContent += `✗ Error: ${err.name} - ${err.message}`;
+          statusDiv.innerHTML = `<div class="status error">✗ ${err.name}</div>`;
+        });
+    }
+
+    function stopMicrophone() {
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+        micStream = null;
+        document.getElementById('micStatus').innerHTML = '<div class="status info">Microphone stopped</div>';
+      }
+    }
+
+    function testSpeaker() {
+      const statusDiv = document.getElementById('speakerStatus');
+      const audioEl = document.getElementById('testAudio');
+      
+      // Generate a simple 440Hz sine wave (A note)
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
+      gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 1);
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 1);
+      
+      statusDiv.innerHTML = '<div class="status success">✓ Playing 440Hz tone for 1 second</div>';
+    }
+
+    function testAudioContext() {
+      const output = document.getElementById('apiOutput');
+      output.style.display = 'block';
+      output.textContent = '';
+
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error('AudioContext not supported');
+
+        const ctx = new AudioContextClass();
+        output.textContent += `✓ AudioContext created\n`;
+        output.textContent += `Sample rate: ${ctx.sampleRate} Hz\n`;
+        output.textContent += `State: ${ctx.state}\n`;
+        output.textContent += `Destination: ${ctx.destination.maxChannelCount} channels\n`;
+        
+        ctx.close();
+      } catch (err) {
+        output.textContent += `✗ Error: ${err.message}`;
+      }
+    }
+
+    function testMediaStream() {
+      const output = document.getElementById('apiOutput');
+      output.style.display = 'block';
+      
+      if (!navigator.mediaDevices?.getUserMedia) {
+        output.textContent = '✗ MediaStream API not supported';
+        return;
+      }
+
+      output.textContent = 'Testing MediaStream API...\n';
+
+      navigator.mediaDevices.getUserMedia({ 
+        audio: { 
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true 
+        } 
+      })
+        .then(stream => {
+          output.textContent += '✓ MediaStream obtained\n';
+          output.textContent += `Stream ID: ${stream.id}\n`;
+          output.textContent += `Active: ${stream.active}\n`;
+          output.textContent += `Audio tracks: ${stream.getAudioTracks().length}\n`;
+          output.textContent += `Video tracks: ${stream.getVideoTracks().length}\n`;
+          
+          stream.getTracks().forEach(track => track.stop());
+        })
+        .catch(err => {
+          output.textContent += `✗ Error: ${err.name} - ${err.message}`;
+        });
+    }
+
+    function showConsoleLogs() {
+      const output = document.getElementById('consoleLogs');
+      output.style.display = 'block';
+      output.textContent = consoleLogs.length === 0 
+        ? 'No logs yet'
+        : consoleLogs.map(log => `[${log.time}] ${log.type.toUpperCase()}: ${log.msg}`).join('\n');
+    }
+
+    function showAudioLogs() {
+      const output = document.getElementById('audioLogs');
+      output.style.display = 'block';
+      
+      const voiceLogs = consoleLogs.filter(log => log.msg.includes('[voice]'));
+      
+      if (voiceLogs.length === 0) {
+        output.textContent = 'No audio logs yet. Open SharePass and join audio room.';
+        return;
+      }
+
+      output.textContent = voiceLogs.map(log => 
+        `[${log.time}] ${log.msg}`
+      ).join('\n');
+    }
+
+    function clearConsoleLog() {
+      consoleLogs.length = 0;
+      document.getElementById('consoleLogs').textContent = 'Logs cleared';
+    }
+
+    function openSharePass() {
+      window.open('/', '_blank');
+    }
+  </script>
+</body>
+</html>

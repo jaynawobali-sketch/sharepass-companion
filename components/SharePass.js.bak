@@ -1629,20 +1629,10 @@ function CircleVoicePanel({
       }
 
       const message = String(error?.message || "");
-      console.error("[voice] getUserMedia failed", {
-        errorName: error?.name,
-        errorMessage: message,
-        timestamp: new Date().toISOString(),
-      });
-      
       setVoiceError(
         /permission|denied|blocked/i.test(message)
           ? "Microphone access was blocked. Allow mic permission and try again."
-          : /NotFound|DeviceNotFound/i.test(error?.name || "")
-            ? "No microphone found. Check that your microphone is connected."
-            : /NotSupported|NotAllowed/i.test(error?.name || "")
-              ? "This browser cannot access your microphone. Try Chrome or Safari."
-              : "The live audio room could not start. Please check your microphone and try again.",
+          : "The live audio room could not start. Please check your microphone and try again.",
       );
     } finally {
       setAudioBusy(false);
@@ -1718,36 +1708,17 @@ function CircleVoicePanel({
           hasSrcObject: Boolean(node.srcObject),
         });
         const maybePromise = node.play?.();
-        if (maybePromise && typeof maybePromise.then === "function") {
-          maybePromise
-            .then(() => {
-              console.info("[voice] remote audio playing successfully", memberId);
-              setPipelineStage("playback");
-            })
-            .catch(error => {
-              const errorInfo = {
-                memberId,
-                streamId: remoteStream.id,
-                errorName: error?.name || "Unknown",
-                errorMessage: String(error?.message || error || ""),
-                audioTracks: remoteStream.getAudioTracks().length,
-                trackDetails: remoteStream.getAudioTracks().map(t => ({
-                  id: t.id,
-                  enabled: t.enabled,
-                  muted: t.muted,
-                  readyState: t.readyState,
-                })),
-              };
-              if (/NotAllowed|NotSupported|Permission/i.test(error?.name || "")) {
-                pendingPlaybackMembersRef.current.add(memberId);
-                setAutoplayBlocked(true);
-                console.warn("[voice] remote audio autoplay blocked (will retry on user interaction)", errorInfo);
-              } else {
-                console.error("[voice] remote audio play error", errorInfo);
-              }
+        if (maybePromise && typeof maybePromise.catch === "function") {
+          maybePromise.catch(error => {
+            pendingPlaybackMembersRef.current.add(memberId);
+            setAutoplayBlocked(true);
+            console.warn("[voice] remote audio play blocked", {
+              memberId,
+              streamId: remoteStream.id,
+              message: String(error?.message || error || ""),
             });
-        } else if (!maybePromise) {
-          console.warn("[voice] play() returned no promise - old browser?", { memberId });
+          });
+        } else {
           setPipelineStage("playback");
         }
       } else if (node.srcObject) {
@@ -1762,33 +1733,26 @@ function CircleVoicePanel({
     }
 
     const retryPlayback = () => {
-      console.info("[voice] retrying playback for blocked audio", Array.from(pendingPlaybackMembersRef.current));
       pendingPlaybackMembersRef.current.forEach(memberId => {
         const node = remoteAudioRefs.current[memberId];
 
         if (!node?.srcObject) {
-          console.warn("[voice] no srcObject for", memberId, "- skipping retry");
           pendingPlaybackMembersRef.current.delete(memberId);
           return;
         }
 
-        console.info("[voice] attempting playback retry for", memberId);
         const maybePromise = node.play?.();
         if (maybePromise && typeof maybePromise.then === "function") {
           maybePromise
             .then(() => {
-              console.info("[voice] remote audio resumed after user interaction", { memberId });
               pendingPlaybackMembersRef.current.delete(memberId);
               if (pendingPlaybackMembersRef.current.size === 0) {
                 setAutoplayBlocked(false);
               }
               setPipelineStage("playback");
+              console.info("[voice] remote audio resumed after interaction", { memberId });
             })
-            .catch((error) => {
-              console.error("[voice] playback retry failed for", memberId, ":", error?.message);
-            });
-        } else {
-          console.warn("[voice] play() returned no promise on retry for", memberId);
+            .catch(() => null);
         }
       });
     };
@@ -2402,17 +2366,17 @@ function CircleVoicePanel({
       </div>
 
       {Object.entries(remoteStreams).map(([memberId, stream]) => (
-        <audio
-          key={`remote-audio-${memberId}`}
-          autoPlay
-          playsInline
-          muted={false}
-          ref={node => bindRemoteAudioRef(memberId, node)}
-          data-stream-id={stream.id}
-          style={{ display: "none" }}
-          onCanPlay={() => console.info(`[voice] remote audio canplay from ${memberId}`)}
-          onError={(e) => console.error(`[voice] remote audio error from ${memberId}:`, e.target.error)}
-        />
+        <div key={memberId} style={{ marginTop: 10 }}>
+          <div className="sp-label">Remote audio sink: {memberId}</div>
+          <audio
+            autoPlay
+            playsInline
+            controls
+            ref={node => bindRemoteAudioRef(memberId, node)}
+            data-stream-id={stream.id}
+            style={{ width: "100%", maxWidth: 360 }}
+          />
+        </div>
       ))}
     </div>
   );
