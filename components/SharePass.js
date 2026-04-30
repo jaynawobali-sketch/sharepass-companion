@@ -87,7 +87,7 @@ function resolveIceServers() {
 const WEBRTC_CONFIG = {
   iceServers: resolveIceServers(),
 };
-const WEBRTC_SINGLE_PEER_DEBUG = true;
+const WEBRTC_SINGLE_PEER_DEBUG = false; // Multi-participant audio enabled
 const VOICE_POLL_INTERVAL_MS = 2500;
 const VOICE_HEARTBEAT_INTERVAL_MS = 5000;
 const EMPTY_ITEMS = [];
@@ -1920,11 +1920,11 @@ function CircleVoicePanel({
     const allRemoteMemberIds = voiceParticipants
       .map(participant => participant.memberId)
       .filter(memberId => memberId && memberId !== currentUserId);
-    const remoteMemberIds = WEBRTC_SINGLE_PEER_DEBUG ? allRemoteMemberIds.slice(0, 1) : allRemoteMemberIds;
-    if (WEBRTC_SINGLE_PEER_DEBUG && allRemoteMemberIds.length > 1) {
-      console.warn("[voice] single-peer debug mode active", {
-        selectedPeer: remoteMemberIds[0] || "",
-        skippedPeers: allRemoteMemberIds.slice(1),
+    const remoteMemberIds = allRemoteMemberIds; // All participants connected
+    if (allRemoteMemberIds.length > 0) {
+      console.info("[voice] establishing peer connections", {
+        totalRemotePeers: remoteMemberIds.length,
+        peers: remoteMemberIds,
       });
     }
 
@@ -1936,10 +1936,10 @@ function CircleVoicePanel({
           console.error("Failed to open voice connection", error);
           const message = String(error?.message || error || "");
           if (/target participant is not connected/i.test(message)) {
-            setVoiceStatus("Waiting for the other participant audio channel to become ready...");
+            setVoiceStatus(`Connecting to ${allRemoteMemberIds.length} participant(s). Setting up audio bridge...`);
             return;
           }
-          setVoiceError(`A participant connection could not be opened: ${message || "unknown error"}`);
+          setVoiceError(`Audio connection to peer failed. ${message || "Check your microphone and network."}`);
         });
       }
     });
@@ -1974,16 +1974,11 @@ function CircleVoicePanel({
             continue;
           }
 
-          if (WEBRTC_SINGLE_PEER_DEBUG) {
-            const selectedPeer = voiceParticipants
-              .map(participant => participant.memberId)
-              .filter(memberId => memberId && memberId !== currentUserId)
-              .sort()[0];
-
-            if (selectedPeer && signal.fromMemberId !== selectedPeer) {
-              acknowledgedSignals.push(signal.id);
-              continue;
-            }
+          // Process signals from all remote participants
+          if (!voiceParticipants.some(p => p.memberId === signal.fromMemberId)) {
+            // Participant may have left, acknowledge and skip
+            acknowledgedSignals.push(signal.id);
+            continue;
           }
 
           if (signal.type === "offer") {

@@ -76,6 +76,44 @@ function replaceCircleInList(circles, nextCircle) {
   return circles.map(circle => (circle.id === nextCircle.id ? normalizeCircle(nextCircle) : normalizeCircle(circle)));
 }
 
+
+function autoInviteNextSpeaker(circle, voiceRoom) {
+  // Auto-invite the first queued member if speakers slot is empty and queue is enabled
+  if (!circle.voiceSession?.active || circle.speakers.length > 0 || !circle.allowRequests) {
+    return circle; // Don't auto-invite if someone is already speaking or queue disabled
+  }
+
+  if (!Array.isArray(circle.requestQueue) || circle.requestQueue.length === 0) {
+    return circle; // No one in queue
+  }
+
+  const nextSpeaker = circle.requestQueue[0];
+  const isConnected = voiceRoom?.participants?.some(p => p.memberId === nextSpeaker);
+
+  if (!isConnected) {
+    // Next queued person not in audio room yet, skip for now
+    return circle;
+  }
+
+  const nextMember = getCircleMember(circle, nextSpeaker);
+  // Auto-invite the next queued speaker
+  return {
+    ...circle,
+    speakers: [nextSpeaker],
+    requestQueue: circle.requestQueue.slice(1),
+    chat: [
+      ...circle.chat,
+      {
+        id: `msg-${Date.now()}-${Math.random()}`,
+        author: "Room",
+        authorRole: "system",
+        text: `${nextMember?.name || "Next speaker"} was auto-invited to the floor.`,
+        type: "announcement",
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  };
+}
 function sendMethodNotAllowed(res) {
   res.setHeader("Allow", "GET, POST, PATCH");
   return res.status(405).json({ error: "Method not allowed." });
