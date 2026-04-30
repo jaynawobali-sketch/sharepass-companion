@@ -1708,6 +1708,16 @@ function CircleVoicePanel({
           node.muted = false;
         }
 
+        // Ensure volume is maximum
+        if (node.volume !== 1.0) {
+          node.volume = 1.0;
+          console.info("[voice] set audio volume to maximum for", memberId);
+        }
+
+        // Force remove any CSS mute class if present
+        node.style.pointerEvents = "none";
+        node.style.visibility = "hidden";
+
         console.info("[voice] remote audio element state", {
           memberId,
           streamId: remoteStream.id,
@@ -1762,6 +1772,25 @@ function CircleVoicePanel({
     }
 
     const retryPlayback = () => {
+      // Resume AudioContext if suspended (browser autoplay policy)
+      const audioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (audioContextClass) {
+        try {
+          const contexts = [audioContextRef.current].filter(Boolean);
+          contexts.forEach(ctx => {
+            if (ctx && ctx.state === "suspended") {
+              ctx.resume().then(() => {
+                console.info("[voice] AudioContext resumed");
+              }).catch(err => {
+                console.warn("[voice] AudioContext resume failed:", err);
+              });
+            }
+          });
+        } catch (err) {
+          console.warn("[voice] error checking/resuming AudioContext:", err);
+        }
+      }
+
       console.info("[voice] retrying playback for blocked audio", Array.from(pendingPlaybackMembersRef.current));
       pendingPlaybackMembersRef.current.forEach(memberId => {
         const node = remoteAudioRefs.current[memberId];
@@ -2412,6 +2441,12 @@ function CircleVoicePanel({
           style={{ display: "none" }}
           onCanPlay={() => console.info(`[voice] remote audio canplay from ${memberId}`)}
           onError={(e) => console.error(`[voice] remote audio error from ${memberId}:`, e.target.error)}
+          onPlay={() => {
+            console.info(`[voice] remote audio actually playing from ${memberId}`);
+          }}
+          onLoadedMetadata={() => {
+            console.info(`[voice] remote audio metadata loaded from ${memberId}`);
+          }}
         />
       ))}
     </div>
