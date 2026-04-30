@@ -64,7 +64,10 @@ const DEFAULT_ADMIN_DATA = {
   },
 };
 function resolveIceServers() {
-  const servers = [{ urls: "stun:stun.l.google.com:19302" }];
+  const servers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ];
 
   const turnUrl = String(process.env.NEXT_PUBLIC_TURN_URL || "").trim();
   const turnUsername = String(process.env.NEXT_PUBLIC_TURN_USERNAME || "").trim();
@@ -991,6 +994,7 @@ function CircleVoicePanel({
   const [micMuted, setMicMuted] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("");
   const [voiceError, setVoiceError] = useState("");
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [clockNowMs, setClockNowMs] = useState(Date.now());
   const [localAudioLevel, setLocalAudioLevel] = useState(0);
   const [remoteAudioLevels, setRemoteAudioLevels] = useState({});
@@ -1000,6 +1004,7 @@ function CircleVoicePanel({
   const pendingIceCandidatesRef = useRef({});
   const processedSignalIdsRef = useRef(new Set());
   const remoteAudioRefs = useRef({});
+  const pendingPlaybackMembersRef = useRef(new Set());
   const audioContextRef = useRef(null);
   const analyserEntriesRef = useRef({});
   const meterFrameRef = useRef(null);
@@ -1226,6 +1231,8 @@ function CircleVoicePanel({
     }
 
     resetAudioAnalysis();
+    pendingPlaybackMembersRef.current.clear();
+    setAutoplayBlocked(false);
     setRemoteStreams({});
     setAudioJoined(false);
     setAudioBusy(false);
@@ -1359,13 +1366,30 @@ function CircleVoicePanel({
     const connection = new RTCPeerConnection(WEBRTC_CONFIG);
 
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
+      localStreamRef.current.getAudioTracks().forEach(track => {
         connection.addTrack(track, localStreamRef.current);
+        console.info("[voice] addTrack", {
+          remoteMemberId,
+          trackId: track.id,
+          kind: track.kind,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+        });
       });
     }
 
     connection.ontrack = event => {
       const [eventStream] = Array.isArray(event.streams) ? event.streams : [];
+      console.info("[voice] ontrack", {
+        remoteMemberId,
+        streamId: eventStream?.id || "",
+        trackId: event.track?.id || "",
+        kind: event.track?.kind || "",
+        muted: Boolean(event.track?.muted),
+        enabled: Boolean(event.track?.enabled),
+        readyState: event.track?.readyState || "",
+      });
 
       setRemoteStreams(currentStreams => {
         const existingStream = currentStreams[remoteMemberId];
@@ -1469,31 +1493,45 @@ function CircleVoicePanel({
         },
       });
       const [audioTrack] = stream.getAudioTracks();
+      console.info("[voice] getUserMedia result", {
+        streamId: stream.id,
+        audioTrackCount: stream.getAudioTracks().length,
+      });
 
-      if (audioTrack) {
-        audioTrack.enabled = !micMuted;
-
-        audioTrack.addEventListener("ended", () => {
-          if (localStreamRef.current === stream) {
-            detachAudioRoom({
-              error: "Your microphone stream ended. Rejoin the audio room to continue speaking.",
-              clearParticipants: false,
-            });
-          }
-        });
-
-        audioTrack.addEventListener("mute", () => {
-          if (localStreamRef.current === stream) {
-            setVoiceStatus("Microphone input paused by the device/browser.");
-          }
-        });
-
-        audioTrack.addEventListener("unmute", () => {
-          if (localStreamRef.current === stream) {
-            setVoiceStatus("Microphone input is live.");
-          }
-        });
+      if (!audioTrack) {
+        throw new Error("No microphone track returned by getUserMedia.");
       }
+
+      audioTrack.enabled = !micMuted;
+      console.info("[voice] local audio track ready", {
+        trackId: audioTrack.id,
+        enabled: audioTrack.enabled,
+        muted: audioTrack.muted,
+        readyState: audioTrack.readyState,
+      });
+
+      audioTrack.addEventListener("ended", () => {
+        if (localStreamRef.current === stream) {
+          detachAudioRoom({
+            error: "Your microphone stream ended. Rejoin the audio room to continue speaking.",
+            clearParticipants: false,
+          });
+        }
+      });
+
+      audioTrack.addEventListener("mute", () => {
+        if (localStreamRef.current === stream) {
+          setVoiceStatus("Microphone input paused by the device/browser.");
+          console.warn("[voice] local audio track muted by browser/device", { trackId: audioTrack.id });
+        }
+      });
+
+      audioTrack.addEventListener("unmute", () => {
+        if (localStreamRef.current === stream) {
+          setVoiceStatus("Microphone input is live.");
+          console.info("[voice] local audio track unmuted", { trackId: audioTrack.id });
+        }
+      });
 
       localStreamRef.current = stream;
       applyMuteState(micMuted);
@@ -1577,14 +1615,69 @@ function CircleVoicePanel({
           node.muted = false;
         }
 
+        console.info("[voice] remote audio element state", {
+          memberId,
+          streamId: remoteStream.id,
+          muted: node.muted,
+          autoplay: node.autoplay,
+          paused: node.paused,
+          readyState: node.readyState,
+          hasSrcObject: Boolean(node.srcObject),
+        });
         const maybePromise = node.play?.();
         if (maybePromise && typeof maybePromise.catch === "function") {
-          maybePromise.catch(() => null);
+          maybePromise.catch(error => {
+            pendingPlaybackMembersRef.current.add(memberId);
+            setAutoplayBlocked(true);
+            console.warn("[voice] remote audio play blocked", {
+              memberId,
+              streamId: remoteStream.id,
+              message: String(error?.message || error || ""),
+            });
+          });
         }
       } else if (node.srcObject) {
         node.srcObject = null;
       }
     });
+  }, [remoteStreams]);
+
+  useEffect(() => {
+    if (pendingPlaybackMembersRef.current.size === 0) {
+      return undefined;
+    }
+
+    const retryPlayback = () => {
+      pendingPlaybackMembersRef.current.forEach(memberId => {
+        const node = remoteAudioRefs.current[memberId];
+
+        if (!node?.srcObject) {
+          pendingPlaybackMembersRef.current.delete(memberId);
+          return;
+        }
+
+        const maybePromise = node.play?.();
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise
+            .then(() => {
+              pendingPlaybackMembersRef.current.delete(memberId);
+              if (pendingPlaybackMembersRef.current.size === 0) {
+                setAutoplayBlocked(false);
+              }
+              console.info("[voice] remote audio resumed after interaction", { memberId });
+            })
+            .catch(() => null);
+        }
+      });
+    };
+
+    window.addEventListener("pointerdown", retryPlayback);
+    window.addEventListener("keydown", retryPlayback);
+
+    return () => {
+      window.removeEventListener("pointerdown", retryPlayback);
+      window.removeEventListener("keydown", retryPlayback);
+    };
   }, [remoteStreams]);
 
   useEffect(() => {
@@ -2083,6 +2176,11 @@ function CircleVoicePanel({
             )}
           </div>
 
+          {autoplayBlocked ? (
+            <div className="circle-voice-feedback">
+              Browser audio autoplay is blocked. Tap anywhere (or press any key) to start remote audio playback.
+            </div>
+          ) : null}
           {voiceStatus ? <div className="circle-voice-feedback">{voiceStatus}</div> : null}
           {voiceError ? <div className="circle-voice-feedback error">{voiceError}</div> : null}
         </div>
