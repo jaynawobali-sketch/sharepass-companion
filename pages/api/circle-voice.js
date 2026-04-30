@@ -17,6 +17,17 @@ import {
   upsertCircleVoiceParticipant,
 } from "../../lib/sharepass-server-store";
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+/**
+ * Participants who have not sent a heartbeat in this many milliseconds are
+ * considered stale and will be pruned from GET responses. The client sends
+ * heartbeats every 4 s so 12 s is three missed beats.
+ */
+const STALE_PARTICIPANT_MS = 12_000;
+
+// ─── Pure helpers ────────────────────────────────────────────────────────────
+
 function cleanString(value) {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -38,11 +49,20 @@ function resolveActorName(sessionProfile) {
 }
 
 function canAccessVoiceRoom(circle, sessionProfile, actorId) {
-  if (isAdminEmail(sessionProfile.email)) {
-    return true;
-  }
-
+  if (isAdminEmail(sessionProfile.email)) return true;
   return Boolean(getCircleMember(circle, actorId));
+}
+
+/**
+ * Remove participants whose heartbeat timestamp is older than STALE_PARTICIPANT_MS.
+ * This ensures the client never negotiates with a ghost peer.
+ */
+function filterStaleParticipants(participants) {
+  const cutoff = Date.now() - STALE_PARTICIPANT_MS;
+  return participants.filter((p) => {
+    const ts = p.lastSeenAt ? new Date(p.lastSeenAt).getTime() : new Date(p.joinedAt).getTime();
+    return ts >= cutoff;
+  });
 }
 
 function sortParticipants(left, right, circle) {
@@ -50,38 +70,47 @@ function sortParticipants(left, right, circle) {
   const rightMember = getCircleMember(circle, right.memberId);
   const leftPriority = leftMember?.role === "moderator" ? 2 : circle.speakers.includes(left.memberId) ? 1 : 0;
   const rightPriority = rightMember?.role === "moderator" ? 2 : circle.speakers.includes(right.memberId) ? 1 : 0;
-
-  if (leftPriority !== rightPriority) {
-    return rightPriority - leftPriority;
-  }
-
+  if (leftPriority !== rightPriority) return rightPriority - leftPriority;
   return new Date(left.joinedAt) - new Date(right.joinedAt);
 }
 
+/**
+ * Build the response shape the client expects.
+ *
+ * Key fix: signals are filtered to only the requesting actor AND are sorted
+ * oldest-first so the client can process offer → answer → ICE in order.
+ * Stale participants are stripped so WebRTC negotiation is never attempted
+ * toward a peer that has already disconnected.
+ */
 function createVoiceRoomResponse(circle, room, actorId) {
-  const activeMemberIds = new Set(circle.members.map(member => member.id));
-  const participants = room.participants
-    .filter(participant => activeMemberIds.has(participant.memberId))
-    .map(participant => {
-      const circleMember = getCircleMember(circle, participant.memberId);
+  const activeMemberIds = new Set(circle.members.map((m) => m.id));
+  const liveParticipants = filterStaleParticipants(room.participants || []);
 
+  const participants = liveParticipants
+    .filter((p) => activeMemberIds.has(p.memberId))
+    .map((p) => {
+      const circleMember = getCircleMember(circle, p.memberId);
       return {
-        ...participant,
-        name: circleMember?.name || participant.name,
-        role: circleMember?.role || participant.role || "member",
-        onFloor: circle.speakers.includes(participant.memberId),
+        ...p,
+        name: circleMember?.name || p.name,
+        role: circleMember?.role || p.role || "member",
+        onFloor: circle.speakers.includes(p.memberId),
         isModerator: circleMember?.role === "moderator",
       };
     })
-    .sort((left, right) => sortParticipants(left, right, circle));
+    .sort((a, b) => sortParticipants(a, b, circle));
+
+  // Only deliver signals addressed to this actor, oldest first so the client
+  // processes them in the correct WebRTC handshake order.
+  const signals = (room.signals || [])
+    .filter((s) => s.toMemberId === actorId)
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
   return {
     active: Boolean(circle.voiceSession?.active),
     startedAt: circle.voiceSession?.startedAt || "",
     participants,
-    signals: room.signals
-      .filter(signal => signal.toMemberId === actorId)
-      .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt)),
+    signals,
     updatedAt: room.updatedAt,
   };
 }
@@ -91,6 +120,8 @@ function sendMethodNotAllowed(res) {
   return res.status(405).json({ error: "Method not allowed." });
 }
 
+// ─── Route handler ───────────────────────────────────────────────────────────
+
 export default async function handler(req, res) {
   if (!["GET", "POST"].includes(req.method)) {
     return sendMethodNotAllowed(res);
@@ -99,6 +130,7 @@ export default async function handler(req, res) {
   const { db, storage, warning } = await resolveStore();
 
   try {
+    // ── GET: poll for room state + signals ──────────────────────────────────
     if (req.method === "GET") {
       const circleId = cleanString(req.query.circleId);
       const sessionProfile = normalizeSessionProfile(req.query);
@@ -109,7 +141,7 @@ export default async function handler(req, res) {
       }
 
       const circles = await readCircles(db);
-      const circle = circles.find(item => item.id === circleId);
+      const circle = circles.find((c) => c.id === circleId);
 
       if (!circle) {
         return res.status(404).json({ error: "Circle not found." });
@@ -122,8 +154,8 @@ export default async function handler(req, res) {
       }
 
       if (!normalizedCircle.voiceSession?.active) {
+        // Voice session ended — wipe the room so no stale signals survive.
         await clearCircleVoiceRoom(db, circleId);
-
         return res.status(200).json({
           room: {
             active: false,
@@ -146,8 +178,8 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── POST: voice actions ─────────────────────────────────────────────────
     const parsedBody = readJsonObjectBody(req);
-
     if (!parsedBody.ok) {
       return res.status(400).json({ error: parsedBody.error });
     }
@@ -158,14 +190,8 @@ export default async function handler(req, res) {
     const sessionProfile = normalizeSessionProfile(body.sessionProfile);
     const actorId = resolveActorId(sessionProfile);
     const actorName = resolveActorName(sessionProfile);
-    const supportedActions = new Set([
-      "join",
-      "heartbeat",
-      "set-muted",
-      "leave",
-      "signal",
-      "ack-signals",
-    ]);
+
+    const supportedActions = new Set(["join", "heartbeat", "set-muted", "leave", "signal", "ack-signals"]);
 
     if (!circleId || !action) {
       return res.status(400).json({ error: "Circle and voice action are required." });
@@ -176,7 +202,7 @@ export default async function handler(req, res) {
     }
 
     const circles = await readCircles(db);
-    const circle = circles.find(item => item.id === circleId);
+    const circle = circles.find((c) => c.id === circleId);
 
     if (!circle) {
       return res.status(404).json({ error: "Circle not found." });
@@ -189,9 +215,9 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Join this circle before using its audio room." });
     }
 
+    // ── leave: always allowed even if voice session ended ───────────────────
     if (action === "leave") {
       const room = await removeCircleVoiceParticipant(db, circleId, actorId);
-
       return res.status(200).json({
         room: createVoiceRoomResponse(normalizedCircle, room, actorId),
         storage,
@@ -199,6 +225,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // All other actions require an active voice session.
     if (!normalizedCircle.voiceSession?.active) {
       await clearCircleVoiceRoom(db, circleId);
       return res.status(400).json({ error: "The live voice floor is not active right now." });
@@ -208,14 +235,17 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Join the circle before using the audio room." });
     }
 
+    // Shared participant metadata used by join / heartbeat / set-muted / signal
+    const participantMeta = {
+      memberId: actorId,
+      name: currentMember?.name || actorName,
+      role: currentMember?.role || (isAdminEmail(sessionProfile.email) ? "moderator" : "member"),
+      muted: Boolean(body.muted),
+    };
+
+    // ── join ────────────────────────────────────────────────────────────────
     if (action === "join") {
-      const room = await upsertCircleVoiceParticipant(db, circleId, {
-        memberId: actorId,
-        name: currentMember?.name || actorName,
-        role: currentMember?.role || (isAdminEmail(sessionProfile.email) ? "moderator" : "member"),
-        muted: Boolean(body.muted),
-      });
-
+      const room = await upsertCircleVoiceParticipant(db, circleId, participantMeta);
       return res.status(200).json({
         room: createVoiceRoomResponse(normalizedCircle, room, actorId),
         storage,
@@ -223,13 +253,9 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── heartbeat / set-muted ───────────────────────────────────────────────
     if (action === "heartbeat" || action === "set-muted") {
-      const room = await updateCircleVoiceParticipant(db, circleId, actorId, {
-        name: currentMember?.name || actorName,
-        role: currentMember?.role || (isAdminEmail(sessionProfile.email) ? "moderator" : "member"),
-        muted: Boolean(body.muted),
-      });
-
+      const room = await updateCircleVoiceParticipant(db, circleId, actorId, participantMeta);
       return res.status(200).json({
         room: createVoiceRoomResponse(normalizedCircle, room, actorId),
         storage,
@@ -237,6 +263,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── signal (WebRTC offer / answer / ICE) ────────────────────────────────
     if (action === "signal") {
       const toMemberId = cleanString(body.toMemberId);
       const type = cleanString(body.type).toLowerCase();
@@ -249,17 +276,15 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Voice signals must target another participant." });
       }
 
-      const roomWithParticipant = await upsertCircleVoiceParticipant(db, circleId, {
-        memberId: actorId,
-        name: currentMember?.name || actorName,
-        role: currentMember?.role || (isAdminEmail(sessionProfile.email) ? "moderator" : "member"),
-        muted: Boolean(body.muted),
-      });
+      // Make sure the sender appears in the participant list before checking the receiver.
+      const roomWithSender = await upsertCircleVoiceParticipant(db, circleId, participantMeta);
 
-      const receiverConnected = roomWithParticipant.participants
-        .some(participant => participant.memberId === toMemberId);
+      // Validate that the intended receiver is actually connected (and not stale).
+      const liveReceiverIds = new Set(
+        filterStaleParticipants(roomWithSender.participants).map((p) => p.memberId),
+      );
 
-      if (!receiverConnected) {
+      if (!liveReceiverIds.has(toMemberId)) {
         return res.status(400).json({ error: "The target participant is not connected to audio right now." });
       }
 
@@ -273,16 +298,30 @@ export default async function handler(req, res) {
       return res.status(200).json({
         room: createVoiceRoomResponse(normalizedCircle, {
           ...room,
-          participants: room.participants.length > 0 ? room.participants : roomWithParticipant.participants,
+          // Prefer the enriched participant list from upsert if the signal
+          // write returned an empty list (implementation-dependent).
+          participants: room.participants.length > 0 ? room.participants : roomWithSender.participants,
         }, actorId),
         storage,
         warning: mergeWarnings(warning),
       });
     }
 
+    // ── ack-signals ─────────────────────────────────────────────────────────
     if (action === "ack-signals") {
-      const room = await acknowledgeCircleVoiceSignals(db, circleId, actorId, body.signalIds);
+      const signalIds = Array.isArray(body.signalIds) ? body.signalIds : [];
 
+      if (signalIds.length === 0) {
+        // Nothing to acknowledge — return current room state without a write.
+        const room = await readCircleVoiceRoom(db, circleId);
+        return res.status(200).json({
+          room: createVoiceRoomResponse(normalizedCircle, room, actorId),
+          storage,
+          warning,
+        });
+      }
+
+      const room = await acknowledgeCircleVoiceSignals(db, circleId, actorId, signalIds);
       return res.status(200).json({
         room: createVoiceRoomResponse(normalizedCircle, room, actorId),
         storage,
