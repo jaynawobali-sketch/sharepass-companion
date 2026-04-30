@@ -1909,7 +1909,11 @@ function CircleVoicePanel({
     }
 
     remoteMemberIds.forEach(remoteMemberId => {
-      if (!peerConnectionsRef.current[remoteMemberId] && currentUserId.localeCompare(remoteMemberId) < 0) {
+      const shouldInitiateOffer = WEBRTC_SINGLE_PEER_DEBUG
+        ? true
+        : currentUserId.localeCompare(remoteMemberId) < 0;
+
+      if (!peerConnectionsRef.current[remoteMemberId] && shouldInitiateOffer) {
         void ensurePeerConnection(remoteMemberId, true).catch(error => {
           console.error("Failed to open voice connection", error);
           setVoiceError("A participant connection could not be opened. The room will keep retrying.");
